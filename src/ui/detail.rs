@@ -31,10 +31,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let n_flags = stat.map_or(0, |c| c.flags().len()) as u16;
     // One more row for the `nfsd` (in-flight) line when the kernel reports it.
     let info_h = 9 + u16::from(stat.is_some_and(|c| c.inflight.is_some()));
-    let [title, banner, stats, conns, files, footer] = Layout::vertical([
+    let ops_h = stat.map_or(0, ops_height);
+    let [title, banner, stats, ops, conns, files, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(status.len() as u16),
         Constraint::Length(info_h),
+        Constraint::Length(ops_h),
         Constraint::Length(n_conns + n_flags + 3),
         Constraint::Min(5),
         Constraint::Length(1),
@@ -71,6 +73,9 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let [info, chart] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(stats);
     draw_info(f, info, stat, app.model.has_rates());
     draw_chart(f, chart, stat);
+    if let Some(c) = stat.filter(|_| ops_h > 0) {
+        draw_ops(f, ops, c);
+    }
     draw_conns(f, conns, stat);
     draw_files(f, files, d, &mut app.matcher, &app.throbber);
     app.hit.tree = files;
@@ -217,6 +222,84 @@ fn draw_chart(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
             .style(Style::new().fg(DIM)),
     );
     f.render_widget(chart, area);
+}
+
+/// Most operations listed in the per-op panel; the rest are counted in its title.
+const OP_ROWS: usize = 5;
+
+/// Height of the per-op panel: none on kernels without in-flight RPCs, otherwise one row per
+/// operation (at least one, to say none was seen) plus the border.
+fn ops_height(c: &ClientStat) -> u16 {
+    if c.inflight.is_none() && c.op_history.is_empty() {
+        return 0;
+    }
+    c.op_history.len().clamp(1, OP_ROWS) as u16 + 2
+}
+
+/// nfsd threads this client's requests held, per operation: this interval's numbers on the left,
+/// history on the right. All rows share one scale, so heights compare across operations.
+///
+/// These come from sampling the requests in flight ~10x per interval, so an op weighs in by how
+/// many requests were running *and* how long each took: it shows where this client's share of
+/// the server goes, not how many operations it sent. Fast ops (GETATTR, ACCESS, …) on a quiet
+/// client may never be caught at all.
+fn draw_ops(f: &mut Frame, area: Rect, c: &ClientStat) {
+    const LABEL_W: u16 = 44;
+    let mut block = Block::bordered().title(Line::from(vec![
+        Span::raw(" nfsd threads by operation "),
+        Span::raw("· time on the server, not op counts ").fg(DIM),
+    ]));
+    let inner = block.inner(area);
+    let spark_w = inner.width.saturating_sub(LABEL_W + 1) as usize;
+    let ops = c.busiest_ops(spark_w.max(1));
+    if ops.len() > OP_ROWS {
+        block = block.title(Line::from(format!(" +{} more ", ops.len() - OP_ROWS)).fg(DIM).right_aligned());
+    }
+    if ops.is_empty() {
+        let msg = "no requests from this client caught in flight yet (fast or idle)";
+        f.render_widget(Paragraph::new(msg).fg(DIM).block(block), area);
+        return;
+    }
+    let ops = &ops[..ops.len().min(OP_ROWS)];
+    let visible = |name: &str| -> Vec<f64> { c.op_history[name].iter().rev().take(spark_w).copied().collect() };
+    let scale = ops.iter().flat_map(|(name, _)| visible(name)).fold(0.0, f64::max);
+    let now = c.inflight.as_ref();
+    let total = now.map_or(0.0, |l| l.avg);
+    let rows = Layout::vertical(vec![Constraint::Length(1); ops.len()]).split(inner);
+    for ((name, _), row) in ops.iter().zip(rows.iter()) {
+        let [label, _, spark] =
+            Layout::horizontal([Constraint::Length(LABEL_W), Constraint::Length(1), Constraint::Fill(1)]).areas(*row);
+        let color = super::op_color(name);
+        let cur = now.and_then(|l| l.ops.iter().find(|o| o.name == *name));
+        let avg = cur.map_or(0.0, |o| o.avg);
+        let mut spans = vec![
+            Span::raw(format!("{:<11}", super::fit(name, 10))).fg(color).bold(),
+            Span::raw(format!("{:>5}", fmt::avg(avg))).fg(if avg > 0.0 { color } else { DIM }),
+            Span::raw(" thr").fg(DIM),
+            Span::raw(format!(
+                "{:>6}",
+                if avg > 0.0 && total > 0.0 { fmt::percent(avg / total * 100.0) } else { "-".into() }
+            ))
+            .fg(if avg > 0.0 { Color::Reset } else { DIM }),
+        ];
+        if let Some(o) = cur {
+            let age = Span::raw(format!("{:>9}", fmt::latency(o.oldest_us)));
+            spans.push(Span::raw("  oldest").fg(DIM));
+            spans.push(if o.oldest_us >= super::SLOW_RPC_US { age.fg(WARN).bold() } else { age });
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), label);
+        super::sparkline(f.buffer_mut(), spark, &visible(name), scale, color);
+    }
+    // Border caption: what the graphs cover (op samples line up with the rate history).
+    let n = ops.iter().map(|(name, _)| c.op_history[*name].len().min(spark_w)).max().unwrap_or(0);
+    let window = match (c.history.back(), c.history.len().checked_sub(n)) {
+        (Some(newest), Some(i)) if n >= 2 => format!("last {}", fmt::duration(newest.t - c.history[i].t)),
+        _ => "newest at right".into(),
+    };
+    block = block.title_bottom(
+        Line::from(format!(" ◀ {window} · full height = {} threads ", fmt::avg(scale))).fg(DIM).right_aligned(),
+    );
+    f.render_widget(block, area);
 }
 
 fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {

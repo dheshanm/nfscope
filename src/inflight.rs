@@ -25,6 +25,8 @@ pub struct ClientLoad {
     pub peak: u32,
     /// Age of the oldest request seen.
     pub oldest_us: u64,
+    /// This client's requests by operation, busiest first. Their averages add up to `avg`.
+    pub ops: Vec<OpLoad>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -84,6 +86,7 @@ pub struct InflightAcc {
     now: u32,
     clients: HashMap<Option<IpAddr>, Sum>,
     ops: HashMap<String, Sum>,
+    client_ops: HashMap<(Option<IpAddr>, String), Sum>,
     /// By (client address and port, XID): one entry per distinct request.
     seen: HashMap<(Option<SocketAddr>, u32), SlowRpc>,
     /// Why the last snapshot failed, if it did.
@@ -107,9 +110,11 @@ impl InflightAcc {
             *per_client.entry(ip).or_default() += 1;
             let c = self.clients.entry(ip).or_default();
             c.oldest = c.oldest.max(r.age_us);
-            let o = self.ops.entry(r.op_name()).or_default();
-            o.n += 1;
-            o.oldest = o.oldest.max(r.age_us);
+            let op = r.op_name();
+            for o in [self.client_ops.entry((ip, op.clone())).or_default(), self.ops.entry(op).or_default()] {
+                o.n += 1;
+                o.oldest = o.oldest.max(r.age_us);
+            }
             let s = self.seen.entry((r.client, r.xid)).or_insert_with(|| SlowRpc {
                 client: ip,
                 label: r.label(),
@@ -136,18 +141,27 @@ impl InflightAcc {
             return Err(self.error.clone().unwrap_or_else(|| "not sampled yet".into()));
         }
         let snaps = self.snaps as f64;
+        let op_load =
+            |name: &str, s: &Sum| OpLoad { name: name.to_string(), avg: s.n as f64 / snaps, oldest_us: s.oldest };
+        let by_load = |a: &OpLoad, b: &OpLoad| {
+            b.avg.total_cmp(&a.avg).then(b.oldest_us.cmp(&a.oldest_us)).then(a.name.cmp(&b.name))
+        };
+        let mut per_client: HashMap<Option<IpAddr>, Vec<OpLoad>> = HashMap::new();
+        for ((ip, name), s) in &self.client_ops {
+            per_client.entry(*ip).or_default().push(op_load(name, s));
+        }
         let mut clients: Vec<ClientLoad> = self
             .clients
             .iter()
-            .map(|(ip, s)| ClientLoad { ip: *ip, avg: s.n as f64 / snaps, peak: s.peak, oldest_us: s.oldest })
+            .map(|(ip, s)| {
+                let mut ops = per_client.remove(ip).unwrap_or_default();
+                ops.sort_by(by_load);
+                ClientLoad { ip: *ip, avg: s.n as f64 / snaps, peak: s.peak, oldest_us: s.oldest, ops }
+            })
             .collect();
         clients.sort_by(|a, b| b.avg.total_cmp(&a.avg).then(b.oldest_us.cmp(&a.oldest_us)).then(a.ip.cmp(&b.ip)));
-        let mut ops: Vec<OpLoad> = self
-            .ops
-            .iter()
-            .map(|(name, s)| OpLoad { name: name.clone(), avg: s.n as f64 / snaps, oldest_us: s.oldest })
-            .collect();
-        ops.sort_by(|a, b| b.avg.total_cmp(&a.avg).then(b.oldest_us.cmp(&a.oldest_us)).then(a.name.cmp(&b.name)));
+        let mut ops: Vec<OpLoad> = self.ops.iter().map(|(name, s)| op_load(name, s)).collect();
+        ops.sort_by(by_load);
         let mut slowest: Vec<SlowRpc> = self.seen.values().cloned().collect();
         slowest.sort_by(|a, b| b.age_us.cmp(&a.age_us).then(a.client.cmp(&b.client)).then(a.label.cmp(&b.label)));
         slowest.truncate(SLOWEST);
@@ -194,6 +208,13 @@ mod tests {
         assert_eq!(l.clients[0].ip, Some(ip11), "busiest first");
         assert_eq!(l.ops[0].name, "READ");
         assert_eq!(l.ops[1].name, "WRITE");
+        // Per client, by op: .11's 4 sightings were all READs; .12 had only its WRITE.
+        let names = |c: &ClientLoad| c.ops.iter().map(|o| (o.name.clone(), o.avg)).collect::<Vec<_>>();
+        assert_eq!(names(c), vec![("READ".to_string(), 4.0 / 3.0)]);
+        assert_eq!(c.ops[0].oldest_us, 500000);
+        let c12 = l.client("10.0.0.12".parse().unwrap()).unwrap();
+        assert_eq!(names(c12), vec![("WRITE".to_string(), 1.0 / 3.0)]);
+        assert_eq!(c12.ops[0].oldest_us, 2000);
         assert_eq!(l.slowest.len(), 3, "one entry per distinct request");
         assert_eq!(
             l.slowest[0],

@@ -679,3 +679,51 @@ fn busy_threads_averaged_over_interval() {
     assert!(text.contains("avg 24 busy (22 on storage, 2.0 on CPU) · peak 64"), "{text}");
     assert!(text.contains("25% of the time every thread was busy (4 snapshots)"), "{text}");
 }
+
+#[test]
+fn detail_ops_panel_breaks_threads_down_by_operation() {
+    use nfscope::parse::inflight::parse_snapshot;
+    use nfscope::workers::IntervalAcc;
+    let (mut app, mut src) = fixture_app();
+    // Six more intervals for gpu-01: WRITEs ramp up, GETATTRs come and go. collect_with adds
+    // the fixture's own snapshot each time (gpu-01's long-running COMMIT, sometimes a WRITE).
+    for i in 0..6u64 {
+        let mut acc = IntervalAcc::default();
+        let writes = (0..=i).map(|x| format!("10.20.2.21:706 xid={} ops=53,22,38 age_us=9000\n", 100 + x));
+        let mut snap: String = writes.collect();
+        if i % 2 == 0 {
+            snap += "10.20.2.21:706 xid=999 ops=53,22,9 age_us=150\n";
+        }
+        acc.inflight.add(&parse_snapshot(&snap));
+        acc.inflight.add(&parse_snapshot(&snap));
+        let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
+        s.mono += Duration::from_secs(4 + 2 * i);
+        app.on_sample(s);
+    }
+    let gpu: IpAddr = "10.20.2.21".parse().unwrap();
+    let c = &app.model.clients[&gpu];
+    let names: Vec<&str> = c.busiest_ops(100).into_iter().map(|(n, _)| n).collect();
+    // The long COMMIT holds a thread in every snapshot: it outweighs the occasional GETATTRs.
+    assert_eq!(names, ["WRITE", "COMMIT", "GETATTR"]);
+    let l = c.inflight.as_ref().unwrap();
+    let sum: f64 = l.ops.iter().map(|o| o.avg).sum();
+    assert!((sum - l.avg).abs() < 1e-9, "per-op threads add up to the client's");
+
+    app.open_detail(gpu);
+    run_actions(&mut app, &mut src);
+    let b = render(&mut app, 130, 40);
+    let (_, top) = find(&b, "nfsd threads by operation");
+    let y = top + 1;
+    let line = |y: u16| (0..b.buffer().area.width).map(|x| b.buffer()[(x, y)].symbol().to_string()).collect::<String>();
+    assert!(line(y).starts_with("│WRITE        4.3 thr   93%"), "busiest op first: {b}");
+    assert_eq!(b.buffer()[(1, y)].fg, nfscope::ui::WRITE);
+    // The COMMIT has been running for over a second: its age is warning orange.
+    let (_, cy) = find(&b, "COMMIT");
+    let row = line(cy);
+    let ax = row.find(" s ").map(|i| row[..i].chars().count() as u16).expect(&row);
+    assert_eq!(b.buffer()[(ax, cy)].fg, nfscope::ui::WARN, "{row}");
+    // WRITE's sparkline climbs: its newest column is full height.
+    let right = b.buffer().area.width - 2;
+    assert_eq!(b.buffer()[(right, y)].symbol(), "█");
+    insta::assert_snapshot!(b);
+}

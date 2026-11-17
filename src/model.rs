@@ -206,6 +206,11 @@ pub struct ClientStat {
     /// nfsd threads this client's requests kept busy over the last interval. None when
     /// in-flight RPCs are unavailable.
     pub inflight: Option<ClientLoad>,
+    /// nfsd threads this client kept busy, per operation, one value per rate sample while
+    /// in-flight RPCs are available (oldest first, at most [`HISTORY`]). An op's history starts
+    /// when it is first seen, so it may be shorter than the others; ops that stay idle for the
+    /// whole window are dropped.
+    pub op_history: BTreeMap<String, VecDeque<f64>>,
 }
 
 impl ClientStat {
@@ -223,6 +228,7 @@ impl ClientStat {
             conn_health: HashMap::new(),
             streaks: [0; 5],
             inflight: None,
+            op_history: BTreeMap::new(),
         }
     }
 
@@ -249,6 +255,34 @@ impl ClientStat {
 
     pub fn nfs_name(&self) -> Option<&str> {
         self.best_info().and_then(|c| c.name.as_deref())
+    }
+
+    /// Operations in `op_history`, busiest first by their average over the last `window` samples.
+    pub fn busiest_ops(&self, window: usize) -> Vec<(&str, f64)> {
+        let mut v: Vec<(&str, f64)> = self
+            .op_history
+            .iter()
+            .map(|(name, h)| {
+                let n = h.len().min(window).max(1);
+                (name.as_str(), h.iter().rev().take(window).sum::<f64>() / n as f64)
+            })
+            .collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
+        v
+    }
+
+    fn push_ops(&mut self, load: &ClientLoad) {
+        for o in &load.ops {
+            self.op_history.entry(o.name.clone()).or_default();
+        }
+        self.op_history.retain(|name, h| {
+            let v = load.ops.iter().find(|o| &o.name == name).map_or(0.0, |o| o.avg);
+            if h.len() == HISTORY {
+                h.pop_front();
+            }
+            h.push_back(v);
+            h.iter().any(|&x| x > 0.0)
+        });
     }
 }
 
@@ -484,6 +518,10 @@ impl Model {
                 c.read_bps = dr as f64 / dt.as_secs_f64();
                 c.write_bps = dw as f64 / dt.as_secs_f64();
                 push_capped(&mut c.history, Point { t, read: c.read_bps, write: c.write_bps });
+                if let Some(l) = c.inflight.take() {
+                    c.push_ops(&l);
+                    c.inflight = Some(l);
+                }
                 tr += c.read_bps;
                 tw += c.write_bps;
             }
@@ -682,6 +720,42 @@ mod tests {
         m.ingest(sample(t0 + Duration::from_secs(64), vec![]));
         assert_eq!(m.server, None);
         assert_eq!(m.server_error.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn per_client_op_history() {
+        use crate::inflight::InflightAcc;
+        use crate::parse::inflight::parse_snapshot;
+        let load = |snap: &str| {
+            let mut acc = InflightAcc::default();
+            acc.add(&parse_snapshot(snap));
+            acc.finish()
+        };
+        let t0 = Instant::now();
+        let mut m = Model::default();
+        let ip = ip1();
+        let tick = |m: &mut Model, i: u64, inflight: Result<InflightLoad, String>| {
+            m.ingest(RawSample { inflight, ..sample(t0 + Duration::from_secs(i), vec![sock("10.0.0.1", 1, 0, 0)]) })
+        };
+        // First sample: no rates yet, nothing recorded.
+        tick(&mut m, 0, load("10.0.0.1:1 xid=1 ops=53,22,25\n"));
+        assert!(m.clients[&ip].op_history.is_empty());
+        tick(&mut m, 1, load("10.0.0.1:1 xid=1 ops=53,22,25\n10.0.0.1:1 xid=2 ops=53,22,25\n"));
+        tick(&mut m, 2, load("10.0.0.1:1 xid=3 ops=53,22,38\n10.0.0.2:1 xid=3 ops=53,22,5\n"));
+        let c = &m.clients[&ip];
+        assert_eq!(c.op_history["READ"], [2.0, 0.0]);
+        assert_eq!(c.op_history["WRITE"], [1.0], "starts when first seen");
+        assert!(!c.op_history.contains_key("COMMIT"), "another client's op");
+        assert_eq!(c.busiest_ops(2), vec![("READ", 1.0), ("WRITE", 1.0)]);
+        assert_eq!(c.busiest_ops(1), vec![("WRITE", 1.0), ("READ", 0.0)]);
+        // No in-flight data this tick: history is left alone.
+        tick(&mut m, 3, Err("gone".into()));
+        assert_eq!(m.clients[&ip].op_history["READ"].len(), 2);
+        // Ops idle for the whole window age out.
+        for i in 4..4 + HISTORY as u64 {
+            tick(&mut m, i, load(""));
+        }
+        assert!(m.clients[&ip].op_history.is_empty());
     }
 
     // -------------------------------------------------------------- TCP health flags

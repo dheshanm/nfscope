@@ -35,6 +35,17 @@ pub fn legend() -> Vec<Span<'static>> {
 }
 pub const DIM: Color = Color::DarkGray;
 
+/// Colour for an NFS operation: data ops share the READ / WRITE colours (COMMIT, which flushes
+/// writes, the deeper write shade); metadata ops are a neutral grey.
+pub fn op_color(name: &str) -> Color {
+    match name {
+        "READ" => READ,
+        "WRITE" => WRITE,
+        "COMMIT" => WRITE_TOT,
+        _ => Color::Indexed(250),
+    }
+}
+
 /// A request running this long (µs) is worth a look: highlighted in `WARN` orange.
 pub const SLOW_RPC_US: u64 = 1_000_000;
 
@@ -280,7 +291,7 @@ fn client_name(app: &App, ip: Option<std::net::IpAddr>) -> String {
 }
 
 /// `s` cut to `w` columns (ending in `…` when cut), padded to exactly `w`.
-fn fit(s: &str, w: usize) -> String {
+pub(super) fn fit(s: &str, w: usize) -> String {
     let n = s.chars().count();
     if n <= w {
         format!("{s:<w$}")
