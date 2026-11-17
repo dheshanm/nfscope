@@ -26,7 +26,7 @@ the `.snap.new` files once you have checked them).
 ```sh
 cargo run --example peek -- tests/fixtures 10.20.1.11   # print one rendered frame
 KEYS=i cargo run --example peek -- tests/fixtures       # …after pressing keys (in-flight panel)
-scripts/screenshots.sh                                  # regenerate docs/*.png (needs Chrome)
+scripts/screenshots.sh                                  # regenerate docs/*.png and docs/demo.gif (needs Chrome, gifski)
 ```
 
 `peek` also takes `TICKS`, `COLS`, `ROWS`, `NAME` and `FORMAT=html`.

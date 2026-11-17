@@ -7,7 +7,7 @@ the nfsd threads, and what files they have open — live, from the server itself
 ![Platform: Linux](https://img.shields.io/badge/platform-Linux-informational)
 ![Written in Rust](https://img.shields.io/badge/written%20in-Rust-orange)
 
-![nfscope: NFS clients sorted by throughput, with server-wide read/write graphs](docs/top.png)
+![nfscope demo: live per-client throughput, sorting by nfsd threads held, a client drill-down, requests in flight and server health](docs/demo.gif)
 
 ## Why
 

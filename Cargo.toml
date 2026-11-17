@@ -8,7 +8,7 @@ repository = "https://github.com/dheshanm/nfscope"
 readme = "README.md"
 keywords = ["nfs", "nfsd", "tui", "monitoring", "sysadmin"]
 categories = ["command-line-utilities", "filesystem", "os::linux-apis"]
-exclude = ["docs/*.png", "scratch/", "tests/fixtures/local/", ".claude/"]
+exclude = ["docs/*.png", "docs/*.gif", "scratch/", "tests/fixtures/local/", ".claude/"]
 
 [dependencies]
 clap = { version = "4.6.8", features = ["derive"] }
