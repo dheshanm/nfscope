@@ -25,15 +25,20 @@ and WRITE below. Both graphs use one scale, so their heights compare directly. O
 one sample, and the newest sample is at the right edge. The bottom border shows how much time
 the graph covers and what full height means. Dots mark samples not collected yet, or idle periods.
 
-The third header line is **nfsd server health**: `nfsd 12/64 busy  4.1k op/s`.
+The third header line is **nfsd server health**: `nfsd 14/128 busy ↑41  4.1k op/s`.
 
-* **12/64 busy** means 12 of the 64 nfsd threads are handling a request right now: either on a
-  CPU or blocked (D state), usually waiting on the exported filesystem. It is sampled each tick
-  from `/proc/<pid>/stat` of the nfsd kernel threads. It turns yellow at 50% and red at 80%.
-  * Most threads busy most of the time means the server needs more threads (`rpc.nfsd N`, or
-    `threads=` in `/etc/nfs.conf`).
-  * Many threads blocked while CPUs are idle means the storage behind the exports is the
-    bottleneck, and adding threads won't help.
+* **14/128 busy** is the *average* number of nfsd threads handling a request during the last
+  interval. A thread counts as busy when it is on a CPU or blocked (D state), usually waiting
+  on the exported filesystem. nfscope takes about 10 snapshots of the thread states per
+  interval from `/proc/<pid>/stat`, so short bursts are not missed. **↑41** is the busiest
+  snapshot.
+* The colour follows the average: yellow at 50%, red at 80%. It also turns red whenever every
+  thread was busy in at least 10% of the snapshots.
+* In the `o` panel, **Saturated** is the share of snapshots with no idle thread.
+  * If saturation is often high, the server needs more threads (`rpc.nfsd N`, or `threads=`
+    in `/etc/nfs.conf`).
+  * If many threads are on storage while saturation stays near 0%, the storage behind the
+    exports is the bottleneck, and adding threads won't help.
 * **op/s** is RPC calls per second. One NFSv4 COMPOUND counts as one call.
 * `pool_stats` is not used for "busy". On recent kernels, and RHEL 9 backports, its
   `sockets-enqueued` counts every transport wake-up, so it can be many times `packets-arrived`.
@@ -51,10 +56,24 @@ The third header line is **nfsd server health**: `nfsd 12/64 busy  4.1k op/s`.
   on port 2049. They are diffed every tick and summed per client IP, so nconnect is handled.
 * Host names come from reverse DNS (on a background pool) plus the NFSv4 client name from
   `/proc/fs/nfsd/clients/*/info`.
+* The **FLAGS** column marks TCP trouble on a client's connections. It reads the same
+  `ss -tni` output, so it costs nothing extra. A flag shows only after its condition holds for
+  2 ticks in a row:
+
+  | Flag | Condition | Meaning |
+  |---|---|---|
+  | `Q` (red) | Recv-Q ≥ 1 MiB | requests are piling up unread: **the server is behind** on this client |
+  | `S` | Send-Q ≥ 4 MiB | replies are piling up: the client is slow to take them |
+  | `L` (yellow) | ≥ 1 retransmit/s, or lost segments | packet loss on the path |
+  | `W` | ≥ 20% of busy time `rwnd_limited` | the client's receive window is the limit |
+  | `B` | ≥ 20% of busy time `sndbuf_limited` | the server's socket send buffer is too small |
+
+  The thresholds are heuristics, set as constants in `src/model.rs`. The drill-down explains
+  each active flag and shows Recv-Q, Send-Q, retransmits/s and RWND% per connection.
 * **Enter** on a client opens a drill-down with:
   * read/write history chart
   * NFSv4 client record (version, lease, callback, kernel)
-  * per-connection TCP stats (RTT, retransmits, cwnd)
+  * per-connection TCP stats (RTT, retransmits/s, Recv-Q / Send-Q, RWND%, cwnd) and what each active flag means
   * tree of the client's open state from `/proc/fs/nfsd/clients/<id>/states`, grouped
     by export mount point and then directory
 

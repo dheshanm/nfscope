@@ -28,11 +28,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let stat = live.or(d.last.as_ref());
 
     let n_conns = stat.map_or(0, |c| c.conns.len()).clamp(1, 4) as u16;
+    let n_flags = stat.map_or(0, |c| c.flags().len()) as u16;
     let [title, banner, stats, conns, files, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(status.len() as u16),
         Constraint::Length(9),
-        Constraint::Length(n_conns + 3),
+        Constraint::Length(n_conns + n_flags + 3),
         Constraint::Min(5),
         Constraint::Length(1),
     ])
@@ -122,15 +123,14 @@ fn draw_info(f: &mut Frame, area: Rect, stat: Option<&ClientStat>, has_rates: bo
     ];
     let rtts: Vec<f64> = c.conns.iter().filter_map(|k| k.rtt_ms).collect();
     let avg_rtt = if rtts.is_empty() { 0.0 } else { rtts.iter().sum::<f64>() / rtts.len() as f64 };
-    let retrans: u64 = c.conns.iter().map(|k| k.retrans).sum();
-    lines.push(kv(
-        "TCP",
-        format!(
-            "{} conn{} · avg rtt {avg_rtt:.2} ms · {retrans} retrans",
-            c.conns.len(),
-            if c.conns.len() == 1 { "" } else { "s" }
-        ),
-    ));
+    // Queue sizes are per connection in the table below; this line must stay one row.
+    let tcp = format!(
+        "{} conn{} · avg rtt {avg_rtt:.2} ms · {} retr/s",
+        c.conns.len(),
+        if c.conns.len() == 1 { "" } else { "s" },
+        c.health.retrans_ps.map_or("…".into(), |r| format!("{r:.1}")),
+    );
+    lines.push(kv("TCP", tcp));
     match c.best_info() {
         Some(ci) => {
             let mut nfs = format!("v4.{}", ci.minor_version.unwrap_or(0));
@@ -201,8 +201,26 @@ fn draw_chart(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
 fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
     let mut conns: Vec<&crate::parse::ss::Sock> = stat.map(|c| c.conns.iter().collect()).unwrap_or_default();
     conns.sort_by_key(|k| std::cmp::Reverse(k.bytes_acked + k.bytes_received));
-    let fits = area.height.saturating_sub(3) as usize;
-    let hdr = ["PORT", "READ TOT", "WRITE TOT", "RTT", "RETRANS", "CWND", "IDLE"];
+    // Active TCP health flags, explained above the table.
+    let flags = stat.map(ClientStat::flags).unwrap_or_default();
+    let block = Block::bordered();
+    let inner = block.inner(area);
+    let [legend, table_area] =
+        Layout::vertical([Constraint::Length(flags.len() as u16), Constraint::Fill(1)]).areas(inner);
+    let legend_lines: Vec<Line> = flags
+        .iter()
+        .map(|f| {
+            Line::from(vec![
+                Span::raw(format!(" {} ", f.letter())).fg(super::flag_color(*f)).bold(),
+                Span::raw(f.meaning()),
+            ])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(legend_lines), legend);
+
+    let health = |port: u16| stat.and_then(|c| c.conn_health.get(&port)).copied().unwrap_or_default();
+    let fits = table_area.height.saturating_sub(1) as usize;
+    let hdr = ["PORT", "READ TOT", "WRITE TOT", "RTT", "RETR/s", "RECV-Q", "SEND-Q", "RWND%", "CWND", "IDLE"];
     let right = |s: String| Cell::from(Line::from(s).alignment(Alignment::Right));
     let rows: Vec<Row> = conns
         .iter()
@@ -211,36 +229,41 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
                 (Some(a), Some(b)) => format!("{:.1}s", a.min(b) as f64 / 1000.0),
                 _ => "-".into(),
             };
+            let h = health(k.port);
+            let q = |v: u64| if v == 0 { "0".into() } else { fmt::bytes(v) };
             Row::new(vec![
                 right(k.port.to_string()),
                 right(fmt::bytes(k.bytes_acked)).fg(READ),
                 right(fmt::bytes(k.bytes_received)).fg(WRITE),
                 right(k.rtt_ms.map_or("-".into(), |r| format!("{r:.2} ms"))),
-                right(k.retrans.to_string()),
+                right(h.retrans_ps.map_or("-".into(), |r| format!("{r:.1}"))),
+                right(q(k.recv_q)),
+                right(q(k.send_q)),
+                right(h.rwnd_pct.map_or("-".into(), |p| format!("{p:.0}%"))),
                 right(k.cwnd.map_or("-".into(), |c| c.to_string())),
                 right(idle),
             ])
         })
         .collect();
-    let widths = [6, 11, 11, 10, 8, 6, 8].map(Constraint::Length);
-    let table = Table::new(rows, widths)
-        .header(
-            Row::new(hdr.map(|h| {
-                let color = match h {
-                    "READ TOT" => READ,
-                    "WRITE TOT" => WRITE,
-                    _ => Color::Reset,
-                };
-                Cell::from(Line::from(h).alignment(Alignment::Right).fg(color))
-            }))
-            .style(Style::new().bold().bg(Color::Indexed(236))),
-        )
-        .block(Block::bordered().title(if conns.len() > fits {
-            format!(" TCP connections ({}, busiest {fits} shown) ", conns.len())
-        } else {
-            format!(" TCP connections ({}) ", conns.len())
-        }));
-    f.render_widget(table, area);
+    let widths = [6, 11, 11, 10, 7, 10, 10, 6, 6, 8].map(Constraint::Length);
+    let table = Table::new(rows, widths).header(
+        Row::new(hdr.map(|h| {
+            let color = match h {
+                "READ TOT" => READ,
+                "WRITE TOT" => WRITE,
+                _ => Color::Reset,
+            };
+            Cell::from(Line::from(h).alignment(Alignment::Right).fg(color))
+        }))
+        .style(Style::new().bold().bg(Color::Indexed(236))),
+    );
+    let title = if conns.len() > fits {
+        format!(" TCP connections ({}, busiest {fits} shown) ", conns.len())
+    } else {
+        format!(" TCP connections ({}) ", conns.len())
+    };
+    f.render_widget(block.title(title), area);
+    f.render_widget(table, table_area);
 }
 
 fn file_line(of: &OpenFile) -> Line<'static> {

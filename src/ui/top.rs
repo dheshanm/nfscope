@@ -53,7 +53,19 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// `nfsd 12/64 busy  4.1k op/s`: server-wide health at a glance.
+/// TCP health flags for a client (`Q`, `L`, …), or a dim `·` when there are none.
+pub fn flags_line(c: &crate::model::ClientStat) -> Line<'static> {
+    let flags = c.flags();
+    if flags.is_empty() {
+        return Line::from(" ·").fg(DIM);
+    }
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(flags.into_iter().map(|f| Span::raw(f.letter().to_string()).fg(super::flag_color(f)).bold()));
+    Line::from(spans)
+}
+
+/// `nfsd 14/128 busy ↑41  4.1k op/s`: server-wide health at a glance (average busy threads over
+/// the interval, ↑ the peak snapshot).
 fn server_line(app: &App) -> Line<'static> {
     let m = &app.model;
     if m.server_error.is_some() {
@@ -62,12 +74,15 @@ fn server_line(app: &App) -> Line<'static> {
     }
     let mut spans = vec![Span::raw("nfsd ").bold()];
     match (
-        m.server.as_ref().and_then(|r| r.thread_states),
+        m.server.as_ref().and_then(|r| r.thread_load),
         m.server.as_ref().and_then(|r| r.threads).or(m.server_threads),
     ) {
         (Some(t), _) => {
-            let pct = t.busy_pct().unwrap_or(0.0);
-            spans.push(Span::raw(format!("{}/{} busy", t.busy(), t.total())).fg(super::busy_color(pct)));
+            let color = super::load_color(&t);
+            spans.push(Span::raw(format!("{}/{} busy", t.avg_busy.round() as u64, t.total)).fg(color));
+            if t.samples > 1 {
+                spans.push(Span::raw(format!(" ↑{}", t.peak_busy)).fg(color));
+            }
             spans.push(Span::raw("  "));
         }
         (None, Some(t)) => spans.push(Span::raw(format!("{t} thr  "))),
@@ -172,7 +187,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     let has_rates = app.model.has_rates();
 
     let ip_w = rows.iter().map(|c| c.ip.to_string().len()).max().unwrap_or(0).clamp(9, 39) as u16;
-    let cols: [(&str, Option<SortKey>, u16); 9] = [
+    let cols: [(&str, Option<SortKey>, u16); 10] = [
         ("CLIENT", Some(SortKey::Ip), ip_w),
         ("READ/s", Some(SortKey::Read), 12),
         ("WRITE/s", Some(SortKey::Write), 12),
@@ -181,6 +196,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
         ("READ TOT", Some(SortKey::ReadTot), 10),
         ("WRITE TOT", Some(SortKey::WriteTot), 10),
         ("CONN", Some(SortKey::Conns), 5),
+        ("FLAGS", None, 6),
         ("HOST  [NFSv4 client name]", Some(SortKey::Host), 0),
     ];
     let header = Row::new(cols.iter().enumerate().map(|(i, (name, key, _))| {
@@ -237,6 +253,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
                 right(fmt::bytes(c.read_total), Style::new()),
                 right(fmt::bytes(c.write_total), Style::new()),
                 right(c.conns.len().to_string(), Style::new()),
+                Cell::from(flags_line(c)),
                 Cell::from(Line::from(host)),
             ])
         })

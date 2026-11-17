@@ -1,21 +1,20 @@
 ---
 source: tests/render.rs
-assertion_line: 111
 expression: "render(&mut app, 110, 24)"
 ---
 " ◀ back  10.20.4.50  legacy-nfs3.example.org                                                                  "
 "┌ Client ────────────────────────────────────────┐┌ Throughput MiB/s: read / write · peak 2.0 MiB/s ─────────┐"
 "│READ        2.0 MiB/s   total 25.4 GiB          ││2.2│                                                     ⠠│"
 "│WRITE         0.0 B/s   total 14.8 GiB          ││   │                                                      │"
-"│TCP      1 conn · avg rtt 0.70 ms · 0 retrans   ││   │                                                      │"
+"│TCP      1 conn · avg rtt 0.70 ms · 0.0 retr/s  ││   │                                                      │"
 "│NFS      no NFSv4 client record (NFSv3, or nfsd ││   │                                                      │"
 "│info unreadable)                                ││0  │                                                     ⢀│"
 "│                                                ││   └──────────────────────────────────────────────────────│"
 "│                                                ││ -1s                                                   now│"
 "└────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘"
 "┌ TCP connections (1) ───────────────────────────────────────────────────────────────────────────────────────┐"
-"│  PORT    READ TOT   WRITE TOT        RTT  RETRANS   CWND     IDLE                                          │"
-"│   710    25.4 GiB    14.8 GiB    0.70 ms        0     10     0.0s                                          │"
+"│  PORT    READ TOT   WRITE TOT        RTT  RETR/s     RECV-Q     SEND-Q  RWND%   CWND     IDLE              │"
+"│   710    25.4 GiB    14.8 GiB    0.70 ms     0.0          0          0      -     10     0.0s              │"
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
 "┌ Open files ────────────────────────────────────────────────────────────────────────────────────────────────┐"
 "│No NFSv4 client record for this address. NFSv3 clients don't expose per-client open state.                  │"

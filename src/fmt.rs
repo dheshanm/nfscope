@@ -37,6 +37,12 @@ pub fn count(n: f64) -> String {
     }
 }
 
+/// Average count: one decimal below 10 (`0.4`, `2.5`), whole numbers above (`14`).
+pub fn avg(n: f64) -> String {
+    let n = n.max(0.0);
+    if n < 9.95 { format!("{n:.1}") } else { format!("{}", n.round() as u64) }
+}
+
 /// Percentage with one decimal below 10%: `0.4%`, `2.3%`, `45%`.
 pub fn percent(p: f64) -> String {
     let p = p.clamp(0.0, 100.0);
@@ -76,6 +82,12 @@ mod tests {
         assert_eq!(count(999.7), "1.0k");
         assert_eq!(count(12_345.0), "12.3k");
         assert_eq!(count(1_234_567.0), "1.2M");
+    }
+
+    #[test]
+    fn averages() {
+        assert_eq!(avg(0.44), "0.4");
+        assert_eq!(avg(14.2), "14");
     }
 
     #[test]

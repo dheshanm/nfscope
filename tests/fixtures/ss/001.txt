@@ -1,6 +1,6 @@
 0      0      10.20.0.1:2049      10.20.1.11:700
-	 cubic wscale:7,7 rto:201 rtt:0.31/0.05 ato:40 mss:8948 pmtu:9000 rcvmss:536 advmss:8948 cwnd:10 bytes_sent:246960619520 bytes_acked:246960619520 bytes_received:751619276 segs_out:1000 segs_in:1000 send 2.26Gbps lastsnd:12 lastrcv:47 lastack:12 pacing_rate 4.5Gbps retrans:0/3 rcv_space:29200 minrtt:0.1
-0      0      10.20.0.1:2049      10.20.1.11:701
+	 cubic wscale:7,7 rto:201 rtt:0.31/0.05 ato:40 mss:8948 pmtu:9000 rcvmss:536 advmss:8948 cwnd:10 bytes_sent:246960619520 bytes_acked:246960619520 bytes_received:751619276 segs_out:1000 segs_in:1000 send 2.26Gbps lastsnd:12 lastrcv:47 lastack:12 pacing_rate 4.5Gbps busy:100000ms rwnd_limited:5000ms(5.0%) retrans:0/3 rcv_space:29200 minrtt:0.1
+0      262144      10.20.0.1:2049      10.20.1.11:701
 	 cubic wscale:7,7 rto:201 rtt:0.29/0.05 ato:40 mss:8948 pmtu:9000 rcvmss:536 advmss:8948 cwnd:10 bytes_sent:244813135872 bytes_acked:244813135872 bytes_received:751619276 segs_out:1000 segs_in:1000 send 2.26Gbps lastsnd:13 lastrcv:48 lastack:12 pacing_rate 4.5Gbps retrans:0/1 rcv_space:29200 minrtt:0.1
 0      0      10.20.0.1:2049      10.20.1.12:702
 	 cubic wscale:7,7 rto:201 rtt:0.42/0.05 ato:40 mss:8948 pmtu:9000 rcvmss:536 advmss:8948 cwnd:10 bytes_sent:2552284315648 bytes_acked:2552284315648 bytes_received:2552284315648 segs_out:1000 segs_in:1000 send 2.26Gbps lastsnd:14 lastrcv:49 lastack:12 pacing_rate 4.5Gbps retrans:0/12 rcv_space:29200 minrtt:0.1
@@ -12,7 +12,7 @@
 	 cubic wscale:7,7 rto:201 rtt:0.25/0.05 ato:40 mss:8948 pmtu:9000 rcvmss:536 advmss:8948 cwnd:10 bytes_sent:1395864371 bytes_acked:1395864371 bytes_received:107374182 segs_out:1000 segs_in:1000 send 2.26Gbps lastsnd:17 lastrcv:41 lastack:12 pacing_rate 4.5Gbps retrans:0/0 rcv_space:29200 minrtt:0.1
 0      0      10.20.0.1:2049      10.20.2.21:706
 	 cubic wscale:7,7 rto:201 rtt:0.2/0.05 ato:40 mss:8948 pmtu:9000 rcvmss:536 advmss:8948 cwnd:10 bytes_sent:11703785881 bytes_acked:11703785881 bytes_received:19649475379 segs_out:1000 segs_in:1000 send 2.26Gbps lastsnd:18 lastrcv:42 lastack:12 pacing_rate 4.5Gbps retrans:0/0 rcv_space:29200 minrtt:0.1
-0      0      10.20.0.1:2049      10.20.2.22:707
+3145728      0      10.20.0.1:2049      10.20.2.22:707
 	 cubic wscale:7,7 rto:201 rtt:0.22/0.05 ato:40 mss:8948 pmtu:9000 rcvmss:536 advmss:8948 cwnd:10 bytes_sent:0 bytes_acked:0 bytes_received:0 segs_out:1000 segs_in:1000 send 2.26Gbps lastsnd:12 lastrcv:43 lastack:12 pacing_rate 4.5Gbps retrans:0/0 rcv_space:29200 minrtt:0.1
 0      0      [::ffff:10.20.0.1]:2049      [::ffff:10.20.3.30]:708
 	 cubic wscale:7,7 rto:201 rtt:0.33/0.05 ato:40 mss:8948 pmtu:9000 rcvmss:536 advmss:8948 cwnd:10 bytes_sent:2362232012 bytes_acked:2362232012 bytes_received:751619276 segs_out:1000 segs_in:1000 send 2.26Gbps lastsnd:13 lastrcv:44 lastack:12 pacing_rate 4.5Gbps retrans:0/0 rcv_space:29200 minrtt:0.1

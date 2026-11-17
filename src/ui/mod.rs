@@ -28,6 +28,22 @@ pub fn legend() -> Vec<Span<'static>> {
 }
 pub const DIM: Color = Color::DarkGray;
 
+/// Server-side trouble is red, path loss yellow, client/tuning limits cyan.
+pub fn flag_color(f: crate::model::Flag) -> Color {
+    use crate::model::Flag;
+    match f {
+        Flag::RecvQ => Color::Red,
+        Flag::Loss => Color::Yellow,
+        Flag::SendQ | Flag::Rwnd | Flag::Sndbuf => Color::Cyan,
+    }
+}
+
+/// Colour for an interval's thread load: by average busy share, but red whenever every
+/// thread was busy in at least 10 % of the snapshots.
+pub fn load_color(t: &crate::parse::rpc::ThreadLoad) -> Color {
+    if t.all_busy_pct >= 10.0 { Color::Red } else { busy_color(t.busy_pct().unwrap_or(0.0)) }
+}
+
 /// Colour for the share of busy nfsd threads: plain when low, yellow from 50 %, red from 80 %.
 pub fn busy_color(pct: f64) -> Color {
     match pct {
@@ -110,17 +126,41 @@ fn ops_panel(f: &mut Frame, area: Rect, app: &App) {
             busy_row = None;
         }
         (Some(r), None) => {
-            let total = r.thread_states.map(|t| t.total()).or(r.threads);
+            let total = r.thread_load.map(|t| t.total).or(r.threads);
             let mut l = vec![label("Threads"), num(total.map_or("?".into(), |t| t.to_string()))];
-            if let (Some(t), Some(b)) = (r.thread_states, r.busy_pct) {
+            if let Some(t) = r.thread_load {
                 l.extend([
-                    dim(" · "),
-                    Span::raw(format!("{} busy", t.busy())).fg(busy_color(b)).bold(),
-                    dim(&format!(" ({} on storage, {} on CPU)", t.blocked, t.running)),
+                    dim(" · avg "),
+                    Span::raw(format!("{} busy", fmt::avg(t.avg_busy))).fg(load_color(&t)).bold(),
+                    dim(&format!(
+                        " ({} on storage, {} on CPU) · peak ",
+                        fmt::avg(t.avg_blocked),
+                        fmt::avg(t.avg_running)
+                    )),
+                    num(t.peak_busy.to_string()),
                 ]);
             }
-            busy_row = r.busy_pct.map(|_| l.iter().map(|s| s.width()).sum::<usize>() as u16 + 2);
             lines.push(Line::from(l));
+            // Saturation: how often every thread was busy. The busy-share graph sits after it.
+            match r.thread_load {
+                Some(t) => {
+                    let l = vec![
+                        label("Saturated"),
+                        Span::raw(fmt::percent(t.all_busy_pct)).fg(load_color(&t)).bold(),
+                        dim(&format!(
+                            " of the time every thread was busy ({} snapshot{})",
+                            t.samples,
+                            if t.samples == 1 { "" } else { "s" }
+                        )),
+                    ];
+                    busy_row = Some(l.iter().map(|s| s.width()).sum::<usize>() as u16 + 2);
+                    lines.push(Line::from(l));
+                }
+                None => {
+                    busy_row = None;
+                    lines.push(Line::from(vec![label("Saturated"), dim("thread states unavailable")]));
+                }
+            }
             if let Some(a) = r.arrived_ps {
                 let mut l = vec![label("Requests"), num(fmt::count(a)), dim("/s arrived")];
                 if let Some(q) = r.queued_pct {
@@ -154,7 +194,7 @@ fn ops_panel(f: &mut Frame, area: Rect, app: &App) {
                 dim(&format!("   TCP {} / {}", fmt::rate(tr), fmt::rate(tw))),
             ]));
             lines.push(Line::default());
-            lines.push(Line::from("busy = threads handling a request now. All busy for long = add threads;").fg(DIM));
+            lines.push(Line::from("busy = threads handling a request. Often saturated = add threads;").fg(DIM));
             lines.push(Line::from("many on storage = the exported filesystem is the bottleneck.").fg(DIM));
             lines.push(Line::default());
             lines.push(Line::from(format!("{:<20}{:>8}{:>8}", "OPERATION", "OPS/S", "SHARE")).bold());
@@ -163,9 +203,9 @@ fn ops_panel(f: &mut Frame, area: Rect, app: &App) {
     }
 
     // Fixed size whatever the state or number of ops, so the panel never moves or resizes
-    // under the reader's eyes: 9 summary/heading lines, the op rows, and the border.
+    // under the reader's eyes: 10 summary/heading lines, the op rows, and the border.
     const MAX_OPS: usize = 12;
-    const HEIGHT: u16 = 9 + MAX_OPS as u16 + 2;
+    const HEIGHT: u16 = 10 + MAX_OPS as u16 + 2;
     let inner = modal(f, area, 80, HEIGHT, " nfsd server (any key to close) ");
     let room = (inner.height as usize).saturating_sub(lines.len());
     let total: f64 = ops.iter().map(|o| o.1).sum();
@@ -184,9 +224,9 @@ fn ops_panel(f: &mut Frame, area: Rect, app: &App) {
     }
     f.render_widget(Paragraph::new(lines), inner);
 
-    // Busy-thread history to the right of the thread line, scaled so small values show.
+    // Average-busy history to the right of the Saturated line, scaled so small values show.
     if let Some(x) = busy_row {
-        let spark = Rect::new(inner.x + x, inner.y, inner.width.saturating_sub(x), 1).intersection(inner);
+        let spark = Rect::new(inner.x + x, inner.y + 1, inner.width.saturating_sub(x), 1).intersection(inner);
         let hist: Vec<f64> = m.server_busy.iter().rev().take(spark.width as usize).copied().collect();
         let scale = hist.iter().copied().fold(10.0, f64::max);
         // The graph stays visible (green) while the share is low.
@@ -285,6 +325,8 @@ fn help(f: &mut Frame, area: Rect) {
         ("d", "detail: hide files held only as cached delegations"),
         ("o", "nfsd server health: busy threads, ops/s"),
         ("l", "toggle log pane"),
+        ("FLAGS", "Q server behind · S client slow to read · L loss"),
+        ("", "W client window limit · B server send buffer limit"),
         ("mouse", "click header: sort (again: reverse) · double-click row: open"),
         ("", "click tree node: fold · wheel: scroll · right-click: back"),
         ("q / Ctrl-C", "quit"),

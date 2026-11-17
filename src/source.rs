@@ -59,7 +59,7 @@ pub enum SourceSpec {
 impl SourceSpec {
     pub fn build(&self) -> Box<dyn Source> {
         match self {
-            SourceSpec::Live { nfsd_dir } => Box::new(LiveSource { nfsd_dir: nfsd_dir.clone() }),
+            SourceSpec::Live { nfsd_dir } => Box::new(LiveSource::new(nfsd_dir.clone())),
             SourceSpec::Fixture(dir) => Box::new(FixtureSource::new(dir.clone())),
         }
     }
@@ -85,6 +85,64 @@ fn read_client_dirs(dir: &Path) -> Result<Vec<(String, String)>> {
 
 pub struct LiveSource {
     pub nfsd_dir: PathBuf,
+    /// `/proc/<pid>/stat` of each nfsd thread, so thread-state snapshots (taken ~10x per
+    /// interval) read ~threads small files instead of scanning all of /proc.
+    nfsd_stats: Vec<PathBuf>,
+    /// `/proc/fs/nfsd/threads` when `nfsd_stats` was built; a change triggers a rescan.
+    nfsd_threads_at_scan: Option<String>,
+}
+
+impl LiveSource {
+    pub fn new(nfsd_dir: PathBuf) -> Self {
+        Self { nfsd_dir, nfsd_stats: Vec::new(), nfsd_threads_at_scan: None }
+    }
+
+    fn configured_threads(&self) -> Option<String> {
+        let p = self.nfsd_dir.parent()?.join("threads");
+        fs::read_to_string(p).ok().map(|t| t.trim().to_string())
+    }
+
+    /// Find every nfsd kernel thread (one /proc/<pid> each: `pid (nfsd) S ...`).
+    fn rescan_nfsd(&mut self) -> Result<()> {
+        self.nfsd_threads_at_scan = self.configured_threads();
+        self.nfsd_stats.clear();
+        for ent in fs::read_dir("/proc")?.flatten() {
+            if !ent.file_name().to_str().is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())) {
+                continue;
+            }
+            let p = ent.path().join("stat");
+            if fs::read_to_string(&p).is_ok_and(|s| nfsd_state(&s).is_some()) {
+                self.nfsd_stats.push(p);
+            }
+        }
+        Ok(())
+    }
+
+    /// `<state> <count>` lines from the cached threads, or None if the cache is stale.
+    fn cached_thread_states(&self) -> Option<String> {
+        if self.nfsd_stats.is_empty() || self.configured_threads() != self.nfsd_threads_at_scan {
+            return None;
+        }
+        let mut counts: std::collections::BTreeMap<char, u32> = Default::default();
+        for p in &self.nfsd_stats {
+            // A thread that exited (or a pid reused by something else) means rescan.
+            let state = nfsd_state(&fs::read_to_string(p).ok()?)?;
+            *counts.entry(state).or_default() += 1;
+        }
+        Some(counts.iter().map(|(s, n)| format!("{s} {n}\n")).collect())
+    }
+}
+
+/// Scheduler state letter from a `/proc/<pid>/stat` line (`pid (comm) state ppid ...`), if the
+/// task is an nfsd kernel thread: comm exactly `nfsd` and parent kthreadd (pid 2), so a user
+/// process that happens to be called `nfsd` is not counted.
+fn nfsd_state(stat: &str) -> Option<char> {
+    let (head, rest) = stat.rsplit_once(") ")?;
+    let (pid, comm) = head.split_once(" (")?;
+    let mut fields = rest.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let ppid = fields.next()?;
+    (pid.bytes().all(|b| b.is_ascii_digit()) && comm == "nfsd" && ppid == "2").then_some(state)
 }
 
 impl Source for LiveSource {
@@ -135,24 +193,11 @@ impl Source for LiveSource {
     }
 
     fn nfsd_thread_states(&mut self) -> Result<String> {
-        // nfsd threads are kernel threads, one /proc/<pid> each: `pid (nfsd) S ...`.
-        let mut counts: std::collections::BTreeMap<char, u32> = Default::default();
-        for ent in fs::read_dir("/proc")?.flatten() {
-            if !ent.file_name().to_str().is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())) {
-                continue;
-            }
-            let Ok(stat) = fs::read_to_string(ent.path().join("stat")) else { continue };
-            let Some((head, rest)) = stat.rsplit_once(") ") else { continue };
-            if head.ends_with(" (nfsd")
-                && let Some(state) = rest.chars().next()
-            {
-                *counts.entry(state).or_default() += 1;
-            }
+        if let Some(t) = self.cached_thread_states() {
+            return Ok(t);
         }
-        if counts.is_empty() {
-            return Err(eyre!("no nfsd threads running"));
-        }
-        Ok(counts.iter().map(|(s, n)| format!("{s} {n}\n")).collect())
+        self.rescan_nfsd()?;
+        self.cached_thread_states().ok_or_else(|| eyre!("no nfsd threads running"))
     }
 }
 
@@ -305,6 +350,16 @@ impl Source for FixtureSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognises_nfsd_threads_in_proc_stat() {
+        assert_eq!(nfsd_state("1234 (nfsd) I 2 0 0 0 -1 ..."), Some('I'));
+        assert_eq!(nfsd_state("1234 (nfsd) D 2 0 0"), Some('D'));
+        assert_eq!(nfsd_state("99 (lockd) S 2 0 0"), None);
+        assert_eq!(nfsd_state("77 (not (nfsd) R 1 0"), None, "comm with parentheses");
+        assert_eq!(nfsd_state("4321 (nfsd) S 1000 0 0"), None, "user process named nfsd");
+        assert_eq!(nfsd_state("garbage"), None);
+    }
 
     #[test]
     fn extrapolates_counters_only() {

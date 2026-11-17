@@ -499,3 +499,49 @@ fn sparkline_full_cells_fill_background() {
     assert_eq!(cell(0, 1), ("▂".into(), Color::Reset));
     assert_eq!(cell(0, 0).0, " ");
 }
+
+// ------------------------------------------------------------------ TCP health flags
+
+#[test]
+fn flagged_client_explains_its_flags() {
+    use nfscope::model::Flag;
+    let (mut app, mut src) = fixture_app();
+    let ip: IpAddr = "10.20.2.22".parse().unwrap();
+    assert_eq!(app.model.clients[&ip].flags(), vec![Flag::RecvQ]);
+    let b = render(&mut app, 150, 20);
+    let (x, y) = find(&b, " Q ");
+    assert_eq!(b.buffer()[(x + 1, y)].fg, nfscope::ui::flag_color(Flag::RecvQ));
+
+    app.open_detail(ip);
+    run_actions(&mut app, &mut src);
+    let b = render(&mut app, 130, 40);
+    let text = format!("{b}");
+    assert!(text.contains("Q server is behind on this client's requests"), "{b}");
+    assert!(text.contains("3.0 MiB"), "Recv-Q shown per connection:\n{b}");
+}
+
+#[test]
+fn busy_threads_averaged_over_interval() {
+    use nfscope::parse::rpc::{ThreadAcc, ThreadStates};
+    let (mut app, mut src) = fixture_app();
+    // Snapshots the sampler took between ticks: one of them caught every thread busy.
+    let mut acc = ThreadAcc::default();
+    acc.add(ThreadStates { running: 1, blocked: 8, idle: 55 });
+    acc.add(ThreadStates { running: 4, blocked: 60, idle: 0 });
+    acc.add(ThreadStates { running: 2, blocked: 10, idle: 52 });
+    // collect_with adds the fixture's next snapshot (threads/001.txt: 9 busy) and resets acc.
+    let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
+    s.mono += Duration::from_secs(10); // after fixture_app's samples, which run 2 s ahead
+    app.on_sample(s);
+    let l = app.model.server.as_ref().unwrap().thread_load.unwrap();
+    assert_eq!((l.samples, l.peak_busy, l.avg_busy, l.all_busy_pct), (4, 64, 23.5, 25.0));
+    assert_eq!(ThreadAcc::default().finish(), None);
+
+    let b = render(&mut app, 150, 20);
+    let (x, y) = find(&b, "24/64 busy ↑64");
+    assert_eq!(b.buffer()[(x, y)].fg, ratatui::style::Color::Red, "saturated in 25% of snapshots");
+    key(&mut app, KeyCode::Char('o'));
+    let text = format!("{}", render(&mut app, 100, 30));
+    assert!(text.contains("avg 24 busy (22 on storage, 2.0 on CPU) · peak 64"), "{text}");
+    assert!(text.contains("25% of the time every thread was busy (4 snapshots)"), "{text}");
+}

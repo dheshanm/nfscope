@@ -18,6 +18,19 @@ pub struct Sock {
     pub cwnd: Option<u64>,
     pub last_snd_ms: Option<u64>,
     pub last_rcv_ms: Option<u64>,
+    /// Bytes received but not yet read by nfsd (header `Recv-Q`).
+    pub recv_q: u64,
+    /// Bytes queued to the client but not yet acknowledged (header `Send-Q`).
+    pub send_q: u64,
+    /// Segments sent but not yet acknowledged.
+    pub unacked: u64,
+    /// Segments currently considered lost (`ss` only prints this when nonzero).
+    pub lost: u64,
+    /// Cumulative time the connection had data in flight, and how much of it was limited by
+    /// the client's receive window or the server's send buffer (all ms since connect).
+    pub busy_ms: Option<u64>,
+    pub rwnd_limited_ms: Option<u64>,
+    pub sndbuf_limited_ms: Option<u64>,
 }
 
 /// Split `addr:port`, handling `[v6]:port`, bare `::ffff:1.2.3.4:port` and `%iface` suffixes.
@@ -38,6 +51,11 @@ fn looks_like_endpoint(s: &str) -> bool {
     s.contains(':') && parse_endpoint(s).is_some()
 }
 
+/// `18ms` or `18ms(0.4%)` -> 18.
+fn millis(v: &str) -> Option<u64> {
+    v.split("ms").next()?.parse().ok()
+}
+
 pub fn parse_ss(text: &str) -> Vec<Sock> {
     let mut out: Vec<Sock> = Vec::new();
     for line in text.lines() {
@@ -48,15 +66,17 @@ pub fn parse_ss(text: &str) -> Vec<Sock> {
             // Header line: locate the Local and Peer columns as the first pair of
             // adjacent endpoint-looking tokens (robust to an optional State/Netid column).
             let toks: Vec<&str> = line.split_whitespace().collect();
-            let peer = toks
-                .windows(2)
-                .find(|w| looks_like_endpoint(w[0]) && looks_like_endpoint(w[1]))
-                .and_then(|w| parse_endpoint(w[1]));
-            let (ip, port) = match peer {
+            let at = toks.windows(2).position(|w| looks_like_endpoint(w[0]) && looks_like_endpoint(w[1]));
+            let (ip, port) = match at.and_then(|i| parse_endpoint(toks[i + 1])) {
                 Some((ip, port)) => (Some(ip), port),
                 None => (None, 0),
             };
-            out.push(Sock { ip, port, ..Default::default() });
+            // `[State] Recv-Q Send-Q Local Peer`: the queues are the two numbers before Local.
+            let (recv_q, send_q) = match at {
+                Some(i) if i >= 2 => (toks[i - 2].parse().unwrap_or(0), toks[i - 1].parse().unwrap_or(0)),
+                _ => (0, 0),
+            };
+            out.push(Sock { ip, port, recv_q, send_q, ..Default::default() });
             continue;
         }
         let Some(sock) = out.last_mut() else { continue };
@@ -71,6 +91,11 @@ pub fn parse_ss(text: &str) -> Vec<Sock> {
                 "cwnd" => sock.cwnd = v.parse().ok(),
                 "lastsnd" => sock.last_snd_ms = v.parse().ok(),
                 "lastrcv" => sock.last_rcv_ms = v.parse().ok(),
+                "unacked" => sock.unacked = v.parse().unwrap_or(0),
+                "lost" => sock.lost = v.parse().unwrap_or(0),
+                "busy" => sock.busy_ms = millis(v),
+                "rwnd_limited" => sock.rwnd_limited_ms = millis(v),
+                "sndbuf_limited" => sock.sndbuf_limited_ms = millis(v),
                 _ => {}
             }
         }
@@ -89,7 +114,7 @@ pub fn render_ss(socks: &[Sock], local: &str) -> String {
             IpAddr::V4(v4) => format!("{v4}:{}", k.port),
             IpAddr::V6(v6) => format!("[{v6}]:{}", k.port),
         };
-        let _ = writeln!(s, "0      0      {local}      {peer}");
+        let _ = writeln!(s, "{}      {}      {local}      {peer}", k.recv_q, k.send_q);
         let _ = write!(s, "\t cubic wscale:7,7 rto:201");
         if let Some(r) = k.rtt_ms {
             let _ = write!(s, " rtt:{r:.3}/0.05");
@@ -103,6 +128,21 @@ pub fn render_ss(socks: &[Sock], local: &str) -> String {
         }
         if let Some(v) = k.last_rcv_ms {
             let _ = write!(s, " lastrcv:{v}");
+        }
+        if let Some(v) = k.busy_ms {
+            let _ = write!(s, " busy:{v}ms");
+        }
+        if let Some(v) = k.rwnd_limited_ms {
+            let _ = write!(s, " rwnd_limited:{v}ms(0.0%)");
+        }
+        if let Some(v) = k.sndbuf_limited_ms {
+            let _ = write!(s, " sndbuf_limited:{v}ms(0.0%)");
+        }
+        if k.unacked > 0 {
+            let _ = write!(s, " unacked:{}", k.unacked);
+        }
+        if k.lost > 0 {
+            let _ = write!(s, " lost:{}", k.lost);
         }
         let _ = writeln!(s, " retrans:0/{}", k.retrans);
     }
@@ -148,11 +188,24 @@ mod tests {
     }
 
     #[test]
+    fn queues_and_limits() {
+        let t = "\
+2048 1048576 10.0.0.1:2049 10.0.0.9:1000
+\t cubic busy:52340ms rwnd_limited:18ms(0.0%) sndbuf_limited:2600ms(5.0%) unacked:3 lost:1 retrans:0/9
+";
+        let s = &parse_ss(t)[0];
+        assert_eq!((s.recv_q, s.send_q), (2048, 1048576));
+        assert_eq!((s.busy_ms, s.rwnd_limited_ms, s.sndbuf_limited_ms), (Some(52340), Some(18), Some(2600)));
+        assert_eq!((s.unacked, s.lost, s.retrans), (3, 1, 9));
+    }
+
+    #[test]
     fn tolerates_state_column_and_roundtrips() {
-        let t = "ESTAB 0 0 10.0.0.1:2049 10.0.0.9:1000\n\t bytes_acked:9 bytes_received:8\n";
+        let t = "ESTAB 7 9 10.0.0.1:2049 10.0.0.9:1000\n\t bytes_acked:9 bytes_received:8 busy:40ms rwnd_limited:4ms(10.0%) unacked:2\n";
         let s = parse_ss(t);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].port, 1000);
+        assert_eq!((s[0].recv_q, s[0].send_q), (7, 9));
         let again = parse_ss(&render_ss(&s, "10.0.0.1:2049"));
         assert_eq!(again, s);
     }

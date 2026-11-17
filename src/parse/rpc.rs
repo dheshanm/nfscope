@@ -148,6 +148,65 @@ impl ThreadStates {
     }
 }
 
+/// Thread states averaged over the snapshots taken during one sampling interval.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ThreadLoad {
+    pub samples: u32,
+    /// Thread count at the last snapshot.
+    pub total: u32,
+    pub avg_busy: f64,
+    pub avg_blocked: f64,
+    pub avg_running: f64,
+    pub peak_busy: u32,
+    /// Share of snapshots in which no thread was idle (0–100): the "need more threads" signal.
+    pub all_busy_pct: f64,
+}
+
+impl ThreadLoad {
+    /// Average busy threads as a share of all threads (0–100).
+    pub fn busy_pct(&self) -> Option<f64> {
+        (self.total > 0).then(|| (self.avg_busy / self.total as f64 * 100.0).min(100.0))
+    }
+}
+
+/// Collects thread-state snapshots between two samples.
+#[derive(Debug, Clone, Default)]
+pub struct ThreadAcc {
+    n: u32,
+    busy: u64,
+    blocked: u64,
+    running: u64,
+    peak: u32,
+    all_busy: u32,
+    total: u32,
+}
+
+impl ThreadAcc {
+    pub fn add(&mut self, t: ThreadStates) {
+        self.n += 1;
+        self.busy += t.busy() as u64;
+        self.blocked += t.blocked as u64;
+        self.running += t.running as u64;
+        self.peak = self.peak.max(t.busy());
+        self.all_busy += u32::from(t.idle == 0 && t.total() > 0);
+        self.total = t.total();
+    }
+
+    /// The averages so far, or None if nothing was added.
+    pub fn finish(&self) -> Option<ThreadLoad> {
+        let n = self.n as f64;
+        (self.n > 0).then(|| ThreadLoad {
+            samples: self.n,
+            total: self.total,
+            avg_busy: self.busy as f64 / n,
+            avg_blocked: self.blocked as f64 / n,
+            avg_running: self.running as f64 / n,
+            peak_busy: self.peak,
+            all_busy_pct: self.all_busy as f64 / n * 100.0,
+        })
+    }
+}
+
 /// Parse `<state letter> <count>` lines (what `Source::nfsd_thread_states` produces).
 pub fn parse_thread_states(text: &str) -> Option<ThreadStates> {
     let mut t = ThreadStates::default();
@@ -177,7 +236,8 @@ pub struct NfsdStats {
     pub proc3: Vec<u64>,
     pub proc4ops: Vec<u64>,
     pub pool: Option<PoolStats>,
-    pub thread_states: Option<ThreadStates>,
+    /// nfsd thread activity over the interval that ends at this sample.
+    pub thread_load: Option<ThreadLoad>,
 }
 
 fn nums<'a>(it: impl Iterator<Item = &'a str>) -> Vec<u64> {
@@ -328,6 +388,22 @@ proc4 2 1 3456
         assert_eq!(t.busy(), 11);
         assert_eq!(t.busy_pct(), Some(11.0 / 128.0 * 100.0));
         assert_eq!(parse_thread_states(""), None);
+    }
+
+    #[test]
+    fn thread_acc_averages() {
+        let mut acc = ThreadAcc::default();
+        assert_eq!(acc.finish(), None);
+        let st = |r, d, i| ThreadStates { running: r, blocked: d, idle: i };
+        acc.add(st(1, 3, 4)); // 4 busy
+        acc.add(st(0, 0, 8)); // 0 busy
+        acc.add(st(2, 6, 0)); // all 8 busy
+        acc.add(st(1, 1, 6)); // 2 busy
+        let l = acc.finish().unwrap();
+        assert_eq!((l.samples, l.total, l.peak_busy), (4, 8, 8));
+        assert_eq!((l.avg_busy, l.avg_blocked, l.avg_running), (3.5, 2.5, 1.0));
+        assert_eq!(l.all_busy_pct, 25.0);
+        assert_eq!(l.busy_pct(), Some(3.5 / 8.0 * 100.0));
     }
 
     #[test]
