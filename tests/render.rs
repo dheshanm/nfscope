@@ -757,3 +757,29 @@ fn detail_ops_panel_scale_is_at_least_one_thread() {
     let right = b.buffer().area.width - 2;
     assert_eq!(b.buffer()[(right, top + 1)].symbol(), "▁", "{text}");
 }
+
+#[test]
+fn detail_lists_every_nconnect_connection_when_it_fits() {
+    let (mut app, mut src) = fixture_app();
+    let ip: IpAddr = "10.20.1.11".parse().unwrap();
+    // nconnect=16: the fixture's two sockets plus fourteen more.
+    let c = app.model.clients.get_mut(&ip).unwrap();
+    let base = c.conns[0].clone();
+    for i in 0..14u16 {
+        c.conns.push(nfscope::parse::ss::Sock { port: 900 + i, bytes_acked: 1000 + u64::from(i), ..base.clone() });
+    }
+    app.open_detail(ip);
+    run_actions(&mut app, &mut src);
+
+    let text = format!("{}", render(&mut app, 130, 50));
+    assert!(text.contains("TCP connections (16) "), "all 16 fit on a 50-row screen:\n{text}");
+    for i in 0..14 {
+        assert!(text.contains(&format!("│   {}", 900 + i)), "port {} listed:\n{text}", 900 + i);
+    }
+    assert!(text.contains("Open files"), "{text}");
+
+    // A short screen keeps room for the open-files tree and says how many are shown.
+    let text = format!("{}", render(&mut app, 130, 30));
+    assert!(text.contains("TCP connections (16, busiest 4 shown)"), "{text}");
+    assert!(text.contains("Open files"), "{text}");
+}

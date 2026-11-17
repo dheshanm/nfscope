@@ -20,6 +20,10 @@ use crate::fmt;
 use crate::model::{ClientStat, FLAG_LIMITED_PCT, FLAG_RECV_Q, FLAG_RETRANS_PS, FLAG_SEND_Q, Flag};
 
 const MIB: f64 = 1024.0 * 1024.0;
+/// Rows the open-files tree keeps (border included) before the connections table may grow.
+const FILES_MIN: u16 = 8;
+/// Connection rows shown even when the screen is too short to keep `FILES_MIN` for the tree.
+const MIN_CONN_ROWS: u16 = 4;
 
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let status = status_lines(app);
@@ -27,11 +31,16 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let live = app.model.clients.get(&d.ip);
     let stat = live.or(d.last.as_ref());
 
-    let n_conns = stat.map_or(0, |c| c.conns.len()).clamp(1, 4) as u16;
     let n_flags = stat.map_or(0, |c| c.flags().len()) as u16;
     // One more row for the `nfsd` (in-flight) line when the kernel reports it.
     let info_h = 9 + u16::from(stat.is_some_and(|c| c.inflight.is_some()));
     let ops_h = stat.map_or(0, ops_height);
+    // One table row per connection (nconnect=16 shows all 16), as far as the screen allows once
+    // the other panels and FILES_MIN rows of the open-files tree are placed. At least
+    // MIN_CONN_ROWS on short screens; the table title says when the rest are cut.
+    let fixed = 1 + status.len() as u16 + info_h + ops_h + n_flags + 3 + FILES_MIN + 1;
+    let conn_room = area.height.saturating_sub(fixed).max(MIN_CONN_ROWS);
+    let n_conns = stat.map_or(0, |c| c.conns.len()).clamp(1, conn_room as usize) as u16;
     let [title, banner, stats, ops, conns, files, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(status.len() as u16),
