@@ -1,0 +1,77 @@
+# Build static Linux binaries and publish them as a GitHub release.
+#
+# Release:  bump `version` in Cargo.toml, commit, then `git tag v0.1.7 && git push origin v0.1.7`.
+# Dry run:  Actions → Release → "Run workflow" builds and tests, and attaches the binaries to the
+#           run as an artifact without creating a release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGETS: x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag matches Cargo.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          # shellcheck disable=SC2086 # split TARGETS into its words
+          rustup target add $TARGETS
+
+      - name: Test
+        run: cargo test --locked
+
+      # .cargo/config.toml links both musl targets with Rust's bundled rust-lld: no C toolchain.
+      - name: Build
+        run: |
+          mkdir dist
+          for t in $TARGETS; do
+            cargo build --release --locked --target "$t"
+            cp "target/$t/release/nfscope" "dist/nfscope-$t"
+          done
+          file dist/*
+          dist/nfscope-x86_64-unknown-linux-musl --version
+          dist/nfscope-x86_64-unknown-linux-musl --dump-sockets --port 2049
+          cd dist && sha256sum nfscope-* > SHA256SUMS && cat SHA256SUMS
+
+      - name: Upload build artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: nfscope-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$GITHUB_REF_NAME
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "nfscope $tag" --generate-notes
+          fi

@@ -60,10 +60,24 @@ The server needs no Rust toolchain. `.cargo/config.toml` links the musl target w
 bundled `rust-lld`, so cross-compiling needs no extra linker or Docker:
 
 ```sh
-rustup target add x86_64-unknown-linux-musl
+rustup target add x86_64-unknown-linux-musl   # or aarch64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 scp target/x86_64-unknown-linux-musl/release/nfscope root@SERVER:/tmp/nfscope-test
 ```
+
+## Releasing
+
+`.github/workflows/release.yml` builds static `x86_64` and `aarch64` musl binaries, runs the
+tests, and publishes a GitHub release with `SHA256SUMS` when a `v*` tag is pushed:
+
+```sh
+# bump `version` in Cargo.toml, then
+cargo build && git commit -am "release v0.1.8"
+git tag v0.1.8 && git push origin master v0.1.8
+```
+
+The tag must match the `Cargo.toml` version. "Run workflow" on the Release action does a dry
+run: it builds and tests, and attaches the binaries to the run instead of publishing.
 
 ## Code layout
 
