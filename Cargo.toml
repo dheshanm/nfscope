@@ -1,6 +1,6 @@
 [package]
 name = "nfscope"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 description = "top for Linux NFS servers: per-client throughput, nfsd thread usage, in-flight requests and open files"
 license = "Unlicense"

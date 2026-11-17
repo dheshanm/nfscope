@@ -37,10 +37,23 @@ fn run_actions(app: &mut App, src: &mut FixtureSource) {
     }
 }
 
+thread_local! {
+    /// When this test's `fixture_app` started (each test runs on its own thread).
+    static T0: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// `secs` after `fixture_app`'s first sample. Later samples must be placed with this, not as
+/// `Instant::now() + secs`: otherwise graph spans include the test's own run time, and a slow
+/// machine renders `-13s` where the snapshot says `-12s`.
+fn at(secs: u64) -> Instant {
+    T0.with(|t| t.get()).expect("fixture_app() first") + Duration::from_secs(secs)
+}
+
 fn fixture_app() -> (App, FixtureSource) {
     let mut src = FixtureSource::new(fixture_dir());
     let mut app = App::new("testserver".into(), Duration::from_secs(2), true);
     let t0 = Instant::now();
+    T0.with(|t| t.set(Some(t0)));
     for i in 0..2u64 {
         let mut s = collect(&mut src, 2049);
         s.mono = t0 + Duration::from_secs(2 * i);
@@ -568,7 +581,7 @@ fn threads_column_averages_inflight_and_sorts() {
     acc.inflight.add(&parse_snapshot(&four));
     acc.inflight.add(&parse_snapshot(&four));
     let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
-    s.mono += Duration::from_secs(10);
+    s.mono = at(10);
     app.on_sample(s);
     let gpu: IpAddr = "10.20.2.21".parse().unwrap();
     let l = app.model.clients[&gpu].inflight.clone().unwrap();
@@ -673,7 +686,7 @@ fn busy_threads_averaged_over_interval() {
     acc.threads.add(ThreadStates { running: 2, blocked: 10, idle: 52 });
     // collect_with adds the fixture's next snapshot (threads/001.txt: 9 busy) and resets acc.
     let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
-    s.mono += Duration::from_secs(10); // after fixture_app's samples, which run 2 s ahead
+    s.mono = at(10); // after fixture_app's samples, which run 2 s ahead
     app.on_sample(s);
     let l = app.model.server.as_ref().unwrap().thread_load.unwrap();
     assert_eq!((l.samples, l.peak_busy, l.avg_busy, l.all_busy_pct), (4, 64, 23.5, 25.0));
@@ -705,7 +718,7 @@ fn detail_ops_panel_breaks_threads_down_by_operation() {
         acc.inflight.add(&parse_snapshot(&snap));
         acc.inflight.add(&parse_snapshot(&snap));
         let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
-        s.mono += Duration::from_secs(4 + 2 * i);
+        s.mono = at(4 + 2 * i);
         app.on_sample(s);
     }
     let gpu: IpAddr = "10.20.2.21".parse().unwrap();
@@ -749,7 +762,7 @@ fn detail_ops_panel_scale_is_at_least_one_thread() {
             acc.inflight.add(&[]);
         }
         let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
-        s.mono += Duration::from_secs(4 + 2 * i);
+        s.mono = at(4 + 2 * i);
         app.on_sample(s);
     }
     let ip: IpAddr = "10.20.4.50".parse().unwrap();
@@ -807,7 +820,7 @@ fn detail_ops_rows_keep_a_fixed_order() {
                 10.20.2.22:707 xid=6 ops=53,22,25 age_us=500\n";
     acc.inflight.add(&parse_snapshot(snap));
     let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
-    s.mono += Duration::from_secs(4);
+    s.mono = at(4);
     app.on_sample(s);
     let ip: IpAddr = "10.20.2.22".parse().unwrap();
     let busiest: Vec<&str> = app.model.clients[&ip].busiest_ops(100).into_iter().map(|(n, _)| n).collect();
