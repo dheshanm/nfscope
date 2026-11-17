@@ -487,7 +487,7 @@ fn help(f: &mut Frame, area: Rect) {
         ("r", "detail: reload open files"),
         ("f", "detail: find full path of file / every file in group (Esc stops)"),
         ("…/IMAGES/", "kernel gives only parent/name: groups every dir with that name"),
-        ("d", "detail: hide files held only as cached delegations"),
+        ("d", "detail: show/hide files held only as cached delegations"),
         ("o", "nfsd server health: busy threads, ops/s"),
         ("i", "requests in flight: which clients / ops hold nfsd threads"),
         ("THREADS", "avg nfsd threads busy with a client's requests (Linux 6.7+)"),

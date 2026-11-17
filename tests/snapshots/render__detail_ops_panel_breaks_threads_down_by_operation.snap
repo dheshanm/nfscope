@@ -41,4 +41,4 @@ expression: b
 "│                                                                                                                                │"
 "│                                                                                                                                │"
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
-"Esc back  ↑↓ move  ←→/↵ fold  e expand all  c collapse all  d hide delegs  / filter  f full path  r reload  p pause  ? help       "
+"Esc back  ↑↓ move  ←→/↵ fold  e expand all  c collapse all  d show delegs  / filter  f full path  r reload  p pause  ? help       "

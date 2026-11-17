@@ -207,18 +207,26 @@ fn detail_hide_delegations() {
     let (mut app, mut src) = fixture_app();
     app.open_detail("10.20.1.11".parse().unwrap());
     run_actions(&mut app, &mut src);
+    // Hidden by default: the three cached_*.nii.gz files are held only as delegations.
     let before = format!("{}", render(&mut app, 130, 40));
     assert!(before.contains("Open files: 33 under 5 dir names"));
+    assert!(before.contains("delegation-only hidden (30 shown)"), "{before}");
+    assert!(!before.contains("sub_020"));
     key(&mut app, KeyCode::Char('d'));
     let after = format!("{}", render(&mut app, 130, 40));
-    // The three cached_*.nii.gz files are held only as delegations.
-    assert!(after.contains("delegation-only hidden (30 shown)"), "{after}");
-    assert!(!after.contains("sub_020"));
+    assert!(!after.contains("delegation-only hidden"), "{after}");
+    assert!(after.contains("sub_020"), "{after}");
+    // The choice carries over to the next client opened.
+    key(&mut app, KeyCode::Esc);
+    app.open_detail("10.20.1.12".parse().unwrap());
+    let View::Detail(d) = &app.view else { panic!("in the drill-down") };
+    assert!(!d.hide_deleg);
 }
 
 #[test]
 fn find_full_paths_on_demand() {
     let (mut app, mut src) = fixture_app();
+    app.hide_deleg = false; // search the whole tree, cached delegations included
     app.open_detail("10.20.1.11".parse().unwrap());
     run_actions(&mut app, &mut src);
     let select = |app: &mut App, id: &[&str]| {
@@ -257,6 +265,7 @@ fn find_full_paths_on_demand() {
 #[test]
 fn esc_stops_a_running_search_before_leaving() {
     let (mut app, mut src) = fixture_app();
+    app.hide_deleg = false; // search the whole tree, cached delegations included
     app.open_detail("10.20.1.11".parse().unwrap());
     run_actions(&mut app, &mut src);
     {
@@ -404,9 +413,9 @@ fn mouse_footer_buttons() {
     app.open_detail("10.20.1.11".parse().unwrap());
     run_actions(&mut app, &mut src);
     let b = render(&mut app, 130, 40);
-    click_at(&mut app, find(&b, "d hide delegs"), t + Duration::from_secs(4));
+    click_at(&mut app, find(&b, "d show delegs"), t + Duration::from_secs(4));
     let b = render(&mut app, 130, 40);
-    assert!(format!("{b}").contains("d show delegs"));
+    assert!(format!("{b}").contains("d hide delegs"));
     click_at(&mut app, find(&b, "Esc back"), t + Duration::from_secs(5));
     assert!(matches!(app.view, nfscope::app::View::Top));
     let b = render(&mut app, 150, 20);
@@ -782,4 +791,35 @@ fn detail_lists_every_nconnect_connection_when_it_fits() {
     let text = format!("{}", render(&mut app, 130, 30));
     assert!(text.contains("TCP connections (16, busiest 4 shown)"), "{text}");
     assert!(text.contains("Open files"), "{text}");
+}
+
+#[test]
+fn detail_ops_rows_keep_a_fixed_order() {
+    use nfscope::parse::inflight::parse_snapshot;
+    use nfscope::workers::IntervalAcc;
+    let (mut app, mut src) = fixture_app();
+    // gpu-02 is busiest with GETATTR, then LOOKUP, then a single READ.
+    let mut acc = IntervalAcc::default();
+    let snap = "10.20.2.22:707 xid=1 ops=53,22,9 age_us=500\n\
+                10.20.2.22:707 xid=2 ops=53,22,9 age_us=500\n\
+                10.20.2.22:707 xid=3 ops=53,22,9 age_us=500\n\
+                10.20.2.22:707 xid=4 ops=53,22,15 age_us=500\n\
+                10.20.2.22:707 xid=5 ops=53,22,15 age_us=500\n\
+                10.20.2.22:707 xid=6 ops=53,22,25 age_us=500\n";
+    acc.inflight.add(&parse_snapshot(snap));
+    let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
+    s.mono += Duration::from_secs(4);
+    app.on_sample(s);
+    let ip: IpAddr = "10.20.2.22".parse().unwrap();
+    let busiest: Vec<&str> = app.model.clients[&ip].busiest_ops(100).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(&busiest[..3], ["GETATTR", "LOOKUP", "READ"]);
+
+    app.open_detail(ip);
+    run_actions(&mut app, &mut src);
+    let b = render(&mut app, 130, 40);
+    // Data ops first, the rest alphabetically: READ above GETATTR whatever the load.
+    let (_, r) = find(&b, "│READ ");
+    let (_, g) = find(&b, "│GETATTR ");
+    let (_, l) = find(&b, "│LOOKUP ");
+    assert!(r < g && g < l, "{b}");
 }

@@ -255,6 +255,17 @@ fn ops_height(c: &ClientStat) -> u16 {
 /// Smallest full height of the ops sparklines, in nfsd threads.
 const MIN_OPS_SCALE: f64 = 1.0;
 
+/// Display order of the per-op rows: data ops first (READ, WRITE, COMMIT), then the rest
+/// alphabetically.
+fn op_rank(name: &str) -> (u8, &str) {
+    match name {
+        "READ" => (0, ""),
+        "WRITE" => (1, ""),
+        "COMMIT" => (2, ""),
+        _ => (3, name),
+    }
+}
+
 fn draw_ops(f: &mut Frame, area: Rect, c: &ClientStat) {
     const LABEL_W: u16 = 44;
     let mut block = Block::bordered().title(Line::from(vec![
@@ -272,7 +283,11 @@ fn draw_ops(f: &mut Frame, area: Rect, c: &ClientStat) {
         f.render_widget(Paragraph::new(msg).fg(DIM).block(block), area);
         return;
     }
-    let ops = &ops[..ops.len().min(OP_ROWS)];
+    // The busiest OP_ROWS are shown, in a fixed order, so one row sits in the same place in
+    // every client's drill-down and they compare at a glance.
+    let mut ops = ops[..ops.len().min(OP_ROWS)].to_vec();
+    ops.sort_by_key(|(name, _)| op_rank(name));
+    let ops = &ops[..];
     let visible = |name: &str| -> Vec<f64> { c.op_history[name].iter().rev().take(spark_w).copied().collect() };
     // At least one thread tall, so a stray 0.1-thread sample on a quiet client stays a sliver
     // instead of a full bar; real load still fills the rows.
@@ -543,7 +558,7 @@ fn draw_files(
                 title.push(Span::raw(format!(" {k} {n}")));
             }
             title.push(Span::raw(" "));
-            if d.hide_deleg {
+            if d.hide_deleg && of.files.iter().any(deleg_only) {
                 title.push(Span::raw(format!("· delegation-only hidden ({shown} shown) ")).cyan());
             }
             if !d.filter.is_empty() {

@@ -156,6 +156,9 @@ pub struct App {
     pub show_ops: bool,
     /// In-flight RPCs overlay: which clients and operations hold nfsd threads.
     pub show_inflight: bool,
+    /// Drill-down hides files held only as cached delegations (`d` toggles). On by default and
+    /// kept across clients, so a choice made in one drill-down carries over to the next.
+    pub hide_deleg: bool,
     pub dns_enabled: bool,
     pub dns: HashMap<IpAddr, Dns>,
     pub throbber: ThrobberState,
@@ -185,6 +188,7 @@ impl App {
             show_help: false,
             show_ops: false,
             show_inflight: false,
+            hide_deleg: true,
             dns_enabled,
             dns: HashMap::new(),
             throbber: ThrobberState::default(),
@@ -640,7 +644,7 @@ impl App {
             tree_state: TreeState::default(),
             filter: String::new(),
             filter_editing: false,
-            hide_deleg: false,
+            hide_deleg: self.hide_deleg,
             last: self.model.clients.get(&ip).cloned(),
             paths: HashMap::new(),
             find: None,
@@ -702,6 +706,7 @@ impl App {
             KeyCode::Char('/') => d.filter_editing = true,
             KeyCode::Char('d') => {
                 d.hide_deleg = !d.hide_deleg;
+                self.hide_deleg = d.hide_deleg;
                 ts.select_first();
             }
             KeyCode::Char('f') => self.find_selected(),

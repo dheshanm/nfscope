@@ -69,6 +69,9 @@ kernels everything else works and the views below explain why this one is missin
     so `SEQUENCE PUTFH READ` counts as READ), with the oldest request of each;
   * the longest-running requests seen during the interval, and whether they are still running.
 * The drill-down shows the client's line: `nfsd 3.0 threads avg · peak 4 · oldest 1.34 s`.
+  Below it, **nfsd threads by operation** splits that into its busiest operations (up to 5),
+  each with a history graph. Rows keep a fixed order (READ, WRITE, COMMIT, then the rest
+  alphabetically), so the same operation is in the same place for every client.
 * A request's age runs from when an nfsd thread took it off the connection. NFSv3 clients are
   covered too, unlike the open-files tree.
 
@@ -112,7 +115,7 @@ kernels everything else works and the views below explain why this one is missin
 | `o` | nfsd server health: busy threads, request rates, ops/s by operation |
 | `i` | requests in flight: which clients and operations hold nfsd threads, slowest requests |
 | `← →` `e` `c` | drill-down: collapse/expand, expand all, collapse all |
-| `d` | drill-down: hide files the client only holds a cached **delegation** for |
+| `d` | drill-down: show or hide files the client only holds a cached **delegation** for (hidden by default) |
 | `r` | drill-down: reload open state |
 | `f` | drill-down: find the full path of the selected file, or of every file in the selected group or export (`Esc` stops) |
 | `l` | log pane |
@@ -142,7 +145,8 @@ Shift+drag to select text while mouse capture is on.
   * `open` means a file the client has open right now.
   * `deleg` means a delegation: the server let the client cache the file, and it may
     no longer be open. Busy clients can hold thousands of these.
-  * Press `d` to see only what is really open.
+  * They are hidden by default, so the tree shows what is really open; press `d` to show
+    them too. The choice holds for every client until nfscope exits.
 * The kernel reports only the **last two path components** (`dir/file`). The export
   comes from mapping the state's `superblock` device to `/proc/self/mountinfo`.
   * So a group is a directory **name**, not a directory: `…/IMAGES/` holds open files
