@@ -15,6 +15,13 @@ use crate::app::{App, HitMap, View};
 pub const READ: Color = Color::Indexed(75); // #5fafff
 /// Write (client → server) is pink everywhere: numbers, labels, graphs, `w` access flags.
 pub const WRITE: Color = Color::Indexed(212); // #ff87d7
+/// Cumulative read bytes: a deeper shade of `READ`, so totals sit behind the live rates.
+pub const READ_TOT: Color = Color::Indexed(32); // #0087d7
+/// Cumulative write bytes: a deeper shade of `WRITE`.
+pub const WRITE_TOT: Color = Color::Indexed(169); // #d75faf
+/// Warnings (retransmits, slow requests, busy threads, missing data sources) are orange;
+/// red is kept for server-side trouble.
+pub const WARN: Color = Color::Indexed(214); // #ffaf00
 
 /// `READ` / `WRITE` legend spans, colour-coded.
 pub fn legend() -> Vec<Span<'static>> {
@@ -28,15 +35,15 @@ pub fn legend() -> Vec<Span<'static>> {
 }
 pub const DIM: Color = Color::DarkGray;
 
-/// A request running this long (µs) is worth a look: highlighted in yellow.
+/// A request running this long (µs) is worth a look: highlighted in `WARN` orange.
 pub const SLOW_RPC_US: u64 = 1_000_000;
 
-/// Server-side trouble is red, path loss yellow, client/tuning limits cyan.
+/// Server-side trouble is red, path loss orange, client/tuning limits cyan.
 pub fn flag_color(f: crate::model::Flag) -> Color {
     use crate::model::Flag;
     match f {
         Flag::RecvQ => Color::Red,
-        Flag::Loss => Color::Yellow,
+        Flag::Loss => WARN,
         Flag::SendQ | Flag::Rwnd | Flag::Sndbuf => Color::Cyan,
     }
 }
@@ -47,11 +54,11 @@ pub fn load_color(t: &crate::parse::rpc::ThreadLoad) -> Color {
     if t.all_busy_pct >= 10.0 { Color::Red } else { busy_color(t.busy_pct().unwrap_or(0.0)) }
 }
 
-/// Colour for the share of busy nfsd threads: plain when low, yellow from 50 %, red from 80 %.
+/// Colour for the share of busy nfsd threads: plain when low, orange from 50 %, red from 80 %.
 pub fn busy_color(pct: f64) -> Color {
     match pct {
         p if p >= 80.0 => Color::Red,
-        p if p >= 50.0 => Color::Yellow,
+        p if p >= 50.0 => WARN,
         _ => Color::Reset,
     }
 }
@@ -123,7 +130,7 @@ fn ops_panel(f: &mut Frame, area: Rect, app: &App) {
     let busy_row;
     match (&m.server, &m.server_error) {
         (_, Some(e)) => {
-            lines.push(Line::from(format!("nfsd server stats unavailable: {e}")).yellow());
+            lines.push(Line::from(format!("nfsd server stats unavailable: {e}")).fg(WARN));
             lines.push(Line::from("Run nfscope as root on the NFS server with nfsd running.").fg(DIM));
             busy_row = None;
         }
@@ -299,7 +306,7 @@ fn inflight_panel(f: &mut Frame, area: Rect, app: &App) {
     let Some(l) = &m.inflight else {
         let lines = match &m.inflight_error {
             Some(e) => vec![
-                Line::from(format!("In-flight requests unavailable: {e}")).yellow(),
+                Line::from(format!("In-flight requests unavailable: {e}")).fg(WARN),
                 Line::default(),
                 Line::from("They come from the nfsd netlink interface (rpc-status-get), which needs").fg(DIM),
                 Line::from("Linux 6.7 or newer with nfsd running. Busy-thread counts (o) work without it.").fg(DIM),
@@ -311,7 +318,7 @@ fn inflight_panel(f: &mut Frame, area: Rect, app: &App) {
     };
     let age = |us: u64| {
         let s = Span::raw(format!("{:>9}", fmt::latency(us)));
-        if us >= SLOW_RPC_US { s.yellow().bold() } else { s }
+        if us >= SLOW_RPC_US { s.fg(WARN).bold() } else { s }
     };
     let head = Style::new().bold().bg(Color::Indexed(236));
     let mut lines = vec![
@@ -450,7 +457,7 @@ pub fn status_lines(app: &App) -> Vec<Line<'static>> {
             Line::from(format!(
                 " ⚠ NFSv4 client info unavailable ({e}). Run as root on the NFS server; rates still work."
             ))
-            .yellow(),
+            .fg(WARN),
         );
     }
     v

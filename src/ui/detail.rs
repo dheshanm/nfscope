@@ -13,11 +13,11 @@ use tui_tree_widget::{Tree, TreeItem};
 
 use crossterm::event::KeyCode;
 
-use super::{DIM, READ, WRITE, footer as draw_footer, status_lines};
+use super::{DIM, READ, READ_TOT, WARN, WRITE, WRITE_TOT, footer as draw_footer, status_lines};
 use crate::app::{App, Detail, PathState, View};
 use crate::files::{ANON_DIR, OpenFile, OpenFiles, dir_label};
 use crate::fmt;
-use crate::model::ClientStat;
+use crate::model::{ClientStat, FLAG_LIMITED_PCT, FLAG_RECV_Q, FLAG_RETRANS_PS, FLAG_SEND_Q, Flag};
 
 const MIB: f64 = 1024.0 * 1024.0;
 
@@ -116,24 +116,27 @@ fn draw_info(f: &mut Frame, area: Rect, stat: Option<&ClientStat>, has_rates: bo
         Line::from(vec![
             Span::raw(format!("{:<9}", "READ")).fg(READ).bold(),
             Span::raw(format!("{:>12}", rate(c.read_bps))),
-            Span::raw(format!("   total {}", fmt::bytes(c.read_total))).fg(DIM),
+            Span::raw("   total ").fg(DIM),
+            Span::raw(fmt::bytes(c.read_total)).fg(READ_TOT),
         ]),
         Line::from(vec![
             Span::raw(format!("{:<9}", "WRITE")).fg(WRITE).bold(),
             Span::raw(format!("{:>12}", rate(c.write_bps))),
-            Span::raw(format!("   total {}", fmt::bytes(c.write_total))).fg(DIM),
+            Span::raw("   total ").fg(DIM),
+            Span::raw(fmt::bytes(c.write_total)).fg(WRITE_TOT),
         ]),
     ];
     let rtts: Vec<f64> = c.conns.iter().filter_map(|k| k.rtt_ms).collect();
     let avg_rtt = if rtts.is_empty() { 0.0 } else { rtts.iter().sum::<f64>() / rtts.len() as f64 };
     // Queue sizes are per connection in the table below; this line must stay one row.
-    let tcp = format!(
-        "{} conn{} · avg rtt {avg_rtt:.2} ms · {} retr/s",
-        c.conns.len(),
-        if c.conns.len() == 1 { "" } else { "s" },
-        c.health.retrans_ps.map_or("…".into(), |r| format!("{r:.1}")),
-    );
-    lines.push(kv("TCP", tcp));
+    let tcp =
+        format!("{} conn{} · avg rtt {avg_rtt:.2} ms · ", c.conns.len(), if c.conns.len() == 1 { "" } else { "s" },);
+    let retr = Span::raw(format!("{} retr/s", c.health.retrans_ps.map_or("…".into(), |r| format!("{r:.1}"))));
+    lines.push(Line::from(vec![
+        Span::raw(format!("{:<9}", "TCP")).fg(DIM),
+        Span::raw(tcp),
+        retrans_style(retr, c.health.retrans_ps),
+    ]));
     // nfsd threads this client kept busy (in-flight RPCs; absent on kernels without them).
     if let Some(l) = &c.inflight {
         let mut v = vec![Span::raw(format!("{:<9}", "nfsd")).fg(DIM)];
@@ -144,7 +147,7 @@ fn draw_info(f: &mut Frame, area: Rect, stat: Option<&ClientStat>, has_rates: bo
             v.extend([
                 Span::raw(format!("{} thread{} avg", fmt::avg(l.avg), if fmt::avg(l.avg) == "1.0" { "" } else { "s" })),
                 Span::raw(format!(" · peak {} · oldest ", l.peak)).fg(DIM),
-                if l.oldest_us >= super::SLOW_RPC_US { oldest.yellow().bold() } else { oldest },
+                if l.oldest_us >= super::SLOW_RPC_US { oldest.fg(WARN).bold() } else { oldest },
             ]);
         }
         lines.push(Line::from(v));
@@ -249,15 +252,32 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
             };
             let h = health(k.port);
             let q = |v: u64| if v == 0 { "0".into() } else { fmt::bytes(v) };
+            // Health columns: dim when quiet, coloured like their flag once past its threshold.
+            let gauge = |text: String, quiet: bool, over: bool, flag: Flag| {
+                let c = right(text);
+                if over {
+                    c.fg(super::flag_color(flag)).bold()
+                } else if quiet {
+                    c.fg(DIM)
+                } else {
+                    c
+                }
+            };
+            let retr = h.retrans_ps.map_or("-".into(), |r| format!("{r:.1}"));
             Row::new(vec![
                 right(k.port.to_string()),
-                right(fmt::bytes(k.bytes_acked)).fg(READ),
-                right(fmt::bytes(k.bytes_received)).fg(WRITE),
+                right(fmt::bytes(k.bytes_acked)).fg(READ_TOT),
+                right(fmt::bytes(k.bytes_received)).fg(WRITE_TOT),
                 right(k.rtt_ms.map_or("-".into(), |r| format!("{r:.2} ms"))),
-                right(h.retrans_ps.map_or("-".into(), |r| format!("{r:.1}"))),
-                right(q(k.recv_q)),
-                right(q(k.send_q)),
-                right(h.rwnd_pct.map_or("-".into(), |p| format!("{p:.0}%"))),
+                Cell::from(retrans_style(Line::from(retr).alignment(Alignment::Right), h.retrans_ps)),
+                gauge(q(k.recv_q), k.recv_q == 0, k.recv_q >= FLAG_RECV_Q, Flag::RecvQ),
+                gauge(q(k.send_q), k.send_q == 0, k.send_q >= FLAG_SEND_Q, Flag::SendQ),
+                gauge(
+                    h.rwnd_pct.map_or("-".into(), |p| format!("{p:.0}%")),
+                    h.rwnd_pct.is_none_or(|p| p < 1.0),
+                    h.rwnd_pct.is_some_and(|p| p >= FLAG_LIMITED_PCT),
+                    Flag::Rwnd,
+                ),
                 right(k.cwnd.map_or("-".into(), |c| c.to_string())),
                 right(idle),
             ])
@@ -267,8 +287,9 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
     let table = Table::new(rows, widths).header(
         Row::new(hdr.map(|h| {
             let color = match h {
-                "READ TOT" => READ,
-                "WRITE TOT" => WRITE,
+                "READ TOT" => READ_TOT,
+                "WRITE TOT" => WRITE_TOT,
+                "RETR/s" => WARN,
                 _ => Color::Reset,
             };
             Cell::from(Line::from(h).alignment(Alignment::Right).fg(color))
@@ -470,5 +491,14 @@ fn draw_files(
                 .node_no_children_symbol("  ");
             f.render_stateful_widget(tree, area, &mut d.tree_state);
         }
+    }
+}
+
+/// Retransmits: dim when none, orange when any, bold orange from the loss-flag threshold.
+fn retrans_style<'a, T: Stylize<'a, T>>(t: T, ps: Option<f64>) -> T {
+    match ps {
+        Some(r) if r >= FLAG_RETRANS_PS => t.fg(WARN).bold(),
+        Some(r) if r > 0.0 => t.fg(WARN),
+        _ => t.fg(DIM),
     }
 }

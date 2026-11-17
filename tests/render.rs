@@ -416,10 +416,10 @@ fn mouse_footer_buttons() {
 
 // ------------------------------------------------------------------ colours
 
-/// Blue = read, pink = write, everywhere they appear.
+/// Blue = read, pink = write, everywhere they appear (totals in a deeper shade).
 #[test]
 fn read_write_colours_are_consistent() {
-    use nfscope::ui::{READ, WRITE};
+    use nfscope::ui::{READ, READ_TOT, WRITE, WRITE_TOT};
     let fg = |b: &TestBackend, pos: (u16, u16)| b.buffer()[pos].fg;
 
     let (mut app, mut src) = fixture_app();
@@ -436,8 +436,9 @@ fn read_write_colours_are_consistent() {
     let (hx, hy) = find(&b, "READ/s");
     assert_eq!(fg(&b, (hx, hy)), READ);
     assert_eq!(fg(&b, find(&b, "WRITE/s")), WRITE);
-    assert_eq!(fg(&b, find(&b, "READ TOT")), READ);
-    assert_eq!(fg(&b, find(&b, "WRITE TOT")), WRITE);
+    // Cumulative totals are a deeper shade of the same hue.
+    assert_eq!(fg(&b, find(&b, "READ TOT")), READ_TOT);
+    assert_eq!(fg(&b, find(&b, "WRITE TOT")), WRITE_TOT);
     assert_eq!(fg(&b, find(&b, "111.1 MiB/s")), READ);
     assert_eq!(fg(&b, find(&b, "43.5 MiB/s")), WRITE);
 
@@ -449,6 +450,10 @@ fn read_write_colours_are_consistent() {
     assert_eq!(fg(&b, (ax, ay)), READ);
     assert_eq!(fg(&b, (ax + 1, ay)), WRITE);
     assert_eq!(fg(&b, find(&b, "3 writable")), WRITE);
+    // Connection table: totals in the deeper shades, retransmits in warning orange.
+    assert_eq!(fg(&b, find(&b, "READ TOT")), READ_TOT);
+    assert_eq!(fg(&b, find(&b, "WRITE TOT")), WRITE_TOT);
+    assert_eq!(fg(&b, find(&b, "RETR/s")), nfscope::ui::WARN);
 }
 
 // ------------------------------------------------------------------ nfsd server health
@@ -568,11 +573,11 @@ fn threads_column_averages_inflight_and_sorts() {
     assert_eq!(app.rows()[0].ip, gpu);
     let b = render(&mut app, 150, 20);
     let (x, y) = find(&b, "THREADS ▼");
-    // Its oldest request ran past a second: the cell is yellow.
+    // Its oldest request ran past a second: the cell is warning orange.
     let row = (y + 1..b.buffer().area.height)
         .find(|&r| format!("{b}").lines().nth(r as usize).is_some_and(|l| l.contains("10.20.2.21")))
         .unwrap();
-    assert_eq!(b.buffer()[(x + 8, row)].fg, ratatui::style::Color::Yellow, "{b}");
+    assert_eq!(b.buffer()[(x + 8, row)].fg, nfscope::ui::WARN, "{b}");
 
     app.open_detail(gpu);
     run_actions(&mut app, &mut src);

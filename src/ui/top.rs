@@ -8,7 +8,7 @@ use throbber_widgets_tui::Throbber;
 use crossterm::event::KeyCode;
 use ratatui::layout::Flex;
 
-use super::{DIM, READ, SLOW_RPC_US, WRITE, footer as draw_footer, legend, status_lines};
+use super::{DIM, READ, READ_TOT, SLOW_RPC_US, WARN, WRITE, WRITE_TOT, footer as draw_footer, legend, status_lines};
 use crate::app::{App, SortKey};
 use crate::fmt;
 
@@ -59,7 +59,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
 fn threads_cell(c: &crate::model::ClientStat) -> Cell<'static> {
     let Some(l) = &c.inflight else { return Cell::from("") };
     let style = match l {
-        l if l.oldest_us >= SLOW_RPC_US => Style::new().fg(Color::Yellow).bold(),
+        l if l.oldest_us >= SLOW_RPC_US => Style::new().fg(WARN).bold(),
         l if l.avg >= 1.0 => Style::new().bold(),
         _ => Style::new(),
     };
@@ -235,8 +235,10 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
         let mut style =
             if key.is_some_and(|k| k == app.sort) { Style::new().bold().underlined() } else { Style::new().bold() };
         match key {
-            Some(SortKey::Read | SortKey::ReadTot) => style = style.fg(READ),
-            Some(SortKey::Write | SortKey::WriteTot) => style = style.fg(WRITE),
+            Some(SortKey::Read) => style = style.fg(READ),
+            Some(SortKey::Write) => style = style.fg(WRITE),
+            Some(SortKey::ReadTot) => style = style.fg(READ_TOT),
+            Some(SortKey::WriteTot) => style = style.fg(WRITE_TOT),
             _ => {}
         }
         let line = Line::from(text).style(style);
@@ -271,8 +273,8 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
                 num(c.write_bps, WRITE),
                 if has_rates { right(fmt::rate(c.total_bps()), total_style) } else { right("…".into(), total_style) },
                 Cell::from(fmt::trend(&c.history, TREND_W)).style(Style::new().fg(Color::Gray)),
-                right(fmt::bytes(c.read_total), Style::new()),
-                right(fmt::bytes(c.write_total), Style::new()),
+                right(fmt::bytes(c.read_total), Style::new().fg(READ_TOT)),
+                right(fmt::bytes(c.write_total), Style::new().fg(WRITE_TOT)),
                 right(c.conns.len().to_string(), Style::new()),
                 Cell::from(flags_line(c)),
                 Cell::from(Line::from(host)),
