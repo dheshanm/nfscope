@@ -104,12 +104,23 @@ pub struct LiveSource {
     nfsd_stats: Vec<PathBuf>,
     /// `/proc/fs/nfsd/threads` when `nfsd_stats` was built; a change triggers a rescan.
     nfsd_threads_at_scan: Option<String>,
+    /// When /proc was last scanned for nfsd threads.
+    last_rescan: Option<std::time::Instant>,
     rpc_status: RpcStatus,
 }
 
+/// While nfsd has no threads (stopped), how often /proc is scanned for them again.
+const IDLE_RESCAN: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl LiveSource {
     pub fn new(nfsd_dir: PathBuf) -> Self {
-        Self { nfsd_dir, nfsd_stats: Vec::new(), nfsd_threads_at_scan: None, rpc_status: RpcStatus::default() }
+        Self {
+            nfsd_dir,
+            nfsd_stats: Vec::new(),
+            nfsd_threads_at_scan: None,
+            last_rescan: None,
+            rpc_status: RpcStatus::default(),
+        }
     }
 
     fn configured_threads(&self) -> Option<String> {
@@ -235,6 +246,8 @@ impl Source for LiveSource {
     fn sockets(&mut self, port: u16) -> Result<String> {
         let out = Command::new("ss")
             .args(["-tniH", "state", "established", &format!("( sport = :{port} )")])
+            // Newer ss sizes its columns to $COLUMNS when not on a terminal; keep its layout fixed.
+            .env_remove("COLUMNS")
             .output()
             .wrap_err("running `ss` (is iproute2 installed?)")?;
         if !out.status.success() {
@@ -282,6 +295,11 @@ impl Source for LiveSource {
         if let Some(t) = self.cached_thread_states() {
             return Ok(t);
         }
+        // The last scan found none (nfsd stopped): don't read all of /proc ~10x a second.
+        if self.nfsd_stats.is_empty() && self.last_rescan.is_some_and(|t| t.elapsed() < IDLE_RESCAN) {
+            return Err(eyre!("no nfsd threads running"));
+        }
+        self.last_rescan = Some(std::time::Instant::now());
         self.rescan_nfsd()?;
         self.cached_thread_states().ok_or_else(|| eyre!("no nfsd threads running"))
     }
@@ -387,7 +405,7 @@ impl Source for FixtureSource {
             let base = last
                 .iter()
                 .map(|s| {
-                    prev.iter().find(|p| p.ip == s.ip && p.port == s.port).map_or((0, 0), |p| {
+                    prev.iter().find(|p| p.key() == s.key()).map_or((0, 0), |p| {
                         (s.bytes_acked.saturating_sub(p.bytes_acked), s.bytes_received.saturating_sub(p.bytes_received))
                     })
                 })

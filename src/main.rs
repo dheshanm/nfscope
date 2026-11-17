@@ -22,8 +22,8 @@ use nfscope::workers::{SamplerCmd, spawn_dns_worker, spawn_find_worker, spawn_sa
 #[derive(Parser, Debug)]
 #[command(version, about)]
 struct Args {
-    /// Sampling interval in seconds.
-    #[arg(short, long, default_value_t = 2)]
+    /// Sampling interval in seconds (1-60; `+`/`-` change it while running).
+    #[arg(short, long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=60))]
     interval: u64,
 
     /// NFS server TCP port.
@@ -38,8 +38,9 @@ struct Args {
     #[arg(long, default_value = "/proc/fs/nfsd/clients", hide = true)]
     nfsd_dir: PathBuf,
 
-    /// Log file (stdout belongs to the TUI). Filter with RUST_LOG.
-    #[arg(long, default_value = "/tmp/nfscope.log")]
+    /// Log file (stdout belongs to the TUI), created readable by its owner only. Filter with
+    /// RUST_LOG. The `l` pane shows the same log.
+    #[arg(long, default_value = "/var/log/nfscope.log")]
     log: PathBuf,
 
     /// Don't reverse-resolve client addresses.
@@ -63,7 +64,18 @@ struct Args {
 
 fn init_logging(path: &std::path::Path) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let filter = || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let file_layer = std::fs::OpenOptions::new().create(true).append(true).open(path).ok().map(|f| {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Owner-only (it names clients), and never through a symlink someone planted.
+        opts.mode(0o600);
+        #[cfg(target_os = "linux")]
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    let opened = opts.open(path);
+    let open_error = opened.as_ref().err().map(|e| e.to_string());
+    let file_layer = opened.ok().map(|f| {
         let (w, guard) = tracing_appender::non_blocking(f);
         (tracing_subscriber::fmt::layer().with_writer(w).with_ansi(false).with_filter(filter()), guard)
     });
@@ -76,6 +88,9 @@ fn init_logging(path: &std::path::Path) -> Option<tracing_appender::non_blocking
         .with(tui_logger::TuiTracingSubscriberLayer.with_filter(filter()))
         .init();
     let _ = tui_logger::init_logger(tui_logger::LevelFilter::Trace);
+    if let Some(e) = open_error {
+        tracing::warn!("not logging to {}: {e} (use --log PATH)", path.display());
+    }
     guard
 }
 
@@ -99,14 +114,15 @@ fn main() -> Result<()> {
 
     tracing::info!("starting nfscope: {spec:?}, interval {}s, port {}", args.interval, args.port);
 
-    let interval = Duration::from_secs(args.interval.max(1));
+    let interval = Duration::from_secs(args.interval);
     let (sample_tx, sample_rx) = unbounded();
     let (cmd_tx, cmd_rx) = unbounded();
     let (states_req_tx, states_req_rx) = unbounded();
     let (states_tx, states_rx) = unbounded();
     let (dns_req_tx, dns_req_rx) = unbounded();
     let (dns_tx, dns_rx) = unbounded();
-    spawn_sampler(spec.clone(), args.port, interval, sample_tx, cmd_rx);
+    let sampler_spec = spec.clone();
+    spawn_sampler(move || sampler_spec.build(), args.port, interval, sample_tx, cmd_rx);
     spawn_states_worker(spec.clone(), states_req_rx, states_tx);
     let (find_req_tx, find_req_rx) = unbounded();
     let (find_tx, find_rx) = unbounded();

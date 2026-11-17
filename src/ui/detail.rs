@@ -351,7 +351,12 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
         .collect();
     f.render_widget(Paragraph::new(legend_lines), legend);
 
-    let health = |port: u16| stat.and_then(|c| c.conn_health.get(&port)).copied().unwrap_or_default();
+    let health = |k: &crate::parse::ss::Sock| {
+        stat.and_then(|c| c.conn_health.get(&(k.port, k.local))).copied().unwrap_or_default()
+    };
+    // A server with several addresses: say which one each connection reached.
+    let servers: std::collections::BTreeSet<_> = conns.iter().filter_map(|k| k.local).collect();
+    let server_w = if servers.len() > 1 { servers.iter().map(|a| a.to_string().len()).max().unwrap_or(0) } else { 0 };
     let fits = table_area.height.saturating_sub(1) as usize;
     let hdr = ["PORT", "READ TOT", "WRITE TOT", "RTT", "RETR/s", "RECV-Q", "SEND-Q", "RWND%", "CWND", "IDLE"];
     let right = |s: String| Cell::from(Line::from(s).alignment(Alignment::Right));
@@ -362,7 +367,7 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
                 (Some(a), Some(b)) => format!("{:.1}s", a.min(b) as f64 / 1000.0),
                 _ => "-".into(),
             };
-            let h = health(k.port);
+            let h = health(k);
             let q = |v: u64| if v == 0 { "0".into() } else { fmt::bytes(v) };
             // Health columns: dim when quiet, coloured like their flag once past its threshold.
             let gauge = |text: String, quiet: bool, over: bool, flag: Flag| {
@@ -376,7 +381,11 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
                 }
             };
             let retr = h.retrans_ps.map_or("-".into(), |r| format!("{r:.1}"));
-            Row::new(vec![
+            let mut cells = Vec::with_capacity(11);
+            if server_w > 0 {
+                cells.push(right(k.local.map_or("?".into(), |a| a.to_string())));
+            }
+            cells.extend([
                 right(k.port.to_string()),
                 right(fmt::bytes(k.bytes_acked)).fg(READ_TOT),
                 right(fmt::bytes(k.bytes_received)).fg(WRITE_TOT),
@@ -392,12 +401,18 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
                 ),
                 right(k.cwnd.map_or("-".into(), |c| c.to_string())),
                 right(idle),
-            ])
+            ]);
+            Row::new(cells)
         })
         .collect();
-    let widths = [6, 11, 11, 10, 7, 10, 10, 6, 6, 8].map(Constraint::Length);
+    let mut widths: Vec<Constraint> = [6, 11, 11, 10, 7, 10, 10, 6, 6, 8].map(Constraint::Length).to_vec();
+    let mut hdr = hdr.to_vec();
+    if server_w > 0 {
+        widths.insert(0, Constraint::Length(server_w.max(6) as u16));
+        hdr.insert(0, "SERVER");
+    }
     let table = Table::new(rows, widths).header(
-        Row::new(hdr.map(|h| {
+        Row::new(hdr.into_iter().map(|h| {
             let color = match h {
                 "READ TOT" => READ_TOT,
                 "WRITE TOT" => WRITE_TOT,

@@ -1,16 +1,18 @@
 //! Turns raw counter snapshots into per-client rates, totals and history.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use crate::inflight::{ClientLoad, InflightLoad};
 use crate::parse::nfsd::ClientInfo;
 use crate::parse::rpc::{NfsdStats, ThreadLoad};
-use crate::parse::ss::Sock;
+use crate::parse::ss::{ConnKey, Sock};
 
 /// Number of rate samples kept per client for sparklines/charts.
 pub const HISTORY: usize = 300;
+/// Samples a connection missing from the socket dump keeps its byte-counter baseline.
+pub const MISSING_GRACE: u8 = 3;
 
 /// One raw observation of the system, produced by the sampler thread.
 #[derive(Debug, Clone)]
@@ -24,6 +26,9 @@ pub struct RawSample {
     pub nfsd: Result<NfsdStats, String>,
     /// RPCs nfsd was working on during the interval (nfsd netlink, Linux 6.7+).
     pub inflight: Result<InflightLoad, String>,
+    /// How long the nfsd probe (thread states, pool stats, in-flight RPCs) has not answered,
+    /// if it hasn't; those figures are missing from this sample.
+    pub nfsd_stalled: Option<Duration>,
 }
 
 /// Server-wide nfsd rates over the last interval.
@@ -199,8 +204,8 @@ pub struct ClientStat {
     pub infos: Vec<ClientInfo>,
     pub history: VecDeque<Point>,
     pub health: ClientHealth,
-    /// Per-connection rates, keyed by client port.
-    pub conn_health: HashMap<u16, SockHealth>,
+    /// Per-connection rates, keyed by client port and server address.
+    pub conn_health: HashMap<(u16, Option<IpAddr>), SockHealth>,
     /// Consecutive ticks each flag's condition has held, in `Flag::ALL` order.
     streaks: [u8; 5],
     /// nfsd threads this client's requests kept busy over the last interval. None when
@@ -289,7 +294,8 @@ impl ClientStat {
 #[derive(Debug, Default)]
 pub struct Model {
     start: Option<Instant>,
-    prev: HashMap<(IpAddr, u16), Sock>,
+    /// Each connection's counters when last seen, and how many samples ago that was.
+    prev: HashMap<ConnKey, (Sock, u8)>,
     prev_at: Option<Instant>,
     pub clients: BTreeMap<IpAddr, ClientStat>,
     /// Server-wide totals over time.
@@ -313,6 +319,8 @@ pub struct Model {
     pub inflight: Option<InflightLoad>,
     /// Why in-flight RPCs are unavailable, if they are.
     pub inflight_error: Option<String>,
+    /// How long the nfsd probe has not answered (see [`RawSample::nfsd_stalled`]).
+    pub nfsd_stalled: Option<Duration>,
 }
 
 /// Rates between two nfsd snapshots, or None if a counter went backwards (nfsd restarted).
@@ -402,8 +410,19 @@ impl Model {
         by_ip
     }
 
+    /// Make `socks` the baseline for the next sample. A connection missing from this sample
+    /// keeps its old baseline for up to [`MISSING_GRACE`] samples: a socket dump can skip a
+    /// socket when connections churn mid-dump, and without its baseline it would come back
+    /// as new, with every byte it ever moved counted in one interval.
     fn remember(&mut self, socks: &[Sock], at: Instant) {
-        self.prev = socks.iter().filter_map(|k| Some(((k.ip?, k.port), k.clone()))).collect();
+        let mut prev: HashMap<ConnKey, (Sock, u8)> =
+            socks.iter().filter_map(|k| Some((k.key()?, (k.clone(), 0)))).collect();
+        for (key, (k, missed)) in self.prev.drain() {
+            if missed < MISSING_GRACE {
+                prev.entry(key).or_insert((k, missed + 1));
+            }
+        }
+        self.prev = prev;
         self.prev_at = Some(at);
     }
 
@@ -449,6 +468,7 @@ impl Model {
     pub fn ingest(&mut self, s: RawSample) {
         let start = *self.start.get_or_insert(s.mono);
         self.last_wall = Some(s.wall.clone());
+        self.nfsd_stalled = s.nfsd_stalled;
         self.ingest_server(&s);
         (self.inflight, self.inflight_error) = match s.inflight {
             Ok(ref l) => (Some(l.clone()), None),
@@ -470,12 +490,18 @@ impl Model {
         let mut next: BTreeMap<IpAddr, ClientStat> = BTreeMap::new();
         let mut deltas: HashMap<IpAddr, (u64, u64)> = HashMap::new();
 
+        let mut seen: HashSet<ConnKey> = HashSet::new();
         for k in socks {
-            let Some(ip) = k.ip else { continue };
+            let Some(key @ (ip, _, _)) = k.key() else { continue };
+            // A dump can list a socket twice; count it once.
+            if !seen.insert(key) {
+                continue;
+            }
             let cur = (k.bytes_acked, k.bytes_received);
             // Counter went backwards (same port reused by a new connection) or a socket that
             // did not exist at the previous sample: everything it carries is new.
-            let prev = self.prev.get(&(ip, k.port)).filter(|p| cur.0 >= p.bytes_acked && cur.1 >= p.bytes_received);
+            let prev =
+                self.prev.get(&key).map(|(p, _)| p).filter(|p| cur.0 >= p.bytes_acked && cur.1 >= p.bytes_received);
             let d = match prev {
                 Some(p) => (cur.0 - p.bytes_acked, cur.1 - p.bytes_received),
                 None => cur,
@@ -497,7 +523,7 @@ impl Model {
             c.write_total += cur.1;
             let h = dt.map(|dt| sock_health(prev, k, dt.as_secs_f64())).unwrap_or_default();
             c.health.add(k, &h);
-            c.conn_health.insert(k.port, h);
+            c.conn_health.insert((k.port, k.local), h);
             c.conns.push(k.clone());
         }
 
@@ -509,7 +535,7 @@ impl Model {
                 .inflight
                 .as_ref()
                 .map(|l| l.client(*ip).cloned().unwrap_or(ClientLoad { ip: Some(*ip), ..Default::default() }));
-            c.conns.sort_by_key(|k| k.port);
+            c.conns.sort_by_key(|k| (k.port, k.local));
             for (n, on) in c.streaks.iter_mut().zip(c.health.conditions()) {
                 *n = if on { n.saturating_add(1) } else { 0 };
             }
@@ -552,6 +578,7 @@ mod tests {
             clients: Ok(vec![]),
             nfsd: Err("none".into()),
             inflight: Err("none".into()),
+            nfsd_stalled: None,
         }
     }
 
@@ -599,6 +626,55 @@ mod tests {
         let c = &m.clients[&"10.0.0.1".parse::<IpAddr>().unwrap()];
         assert_eq!(c.read_bps, (2 * MB) as f64);
         assert_eq!(c.write_bps, 0.0);
+    }
+
+    #[test]
+    fn same_client_port_on_two_server_addresses() {
+        // A multi-homed server: the client picked port 800 towards both addresses. Each
+        // connection keeps its own baseline, so the rate is the real 2 MiB/s, not a lifetime.
+        let via = |local: &str, r: u64| Sock { local: Some(local.parse().unwrap()), ..sock("10.0.0.1", 800, r, 0) };
+        let t0 = Instant::now();
+        let mut m = Model::default();
+        m.ingest(sample(t0, vec![via("10.9.0.1", 500_000 * MB), via("10.9.0.2", 10_000 * MB)]));
+        m.ingest(sample(
+            t0 + Duration::from_secs(1),
+            vec![via("10.9.0.1", 500_000 * MB + MB), via("10.9.0.2", 10_000 * MB + MB)],
+        ));
+        let c = &m.clients[&"10.0.0.1".parse::<IpAddr>().unwrap()];
+        assert_eq!(c.read_bps, (2 * MB) as f64);
+        assert_eq!(c.conns.len(), 2);
+        assert_eq!(c.conn_health.len(), 2);
+    }
+
+    #[test]
+    fn socket_missing_from_one_dump_is_not_a_spike() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut m = Model::default();
+        m.ingest(sample(at(0), vec![sock("10.0.0.1", 1, 900_000 * MB, 0), sock("10.0.0.1", 2, 0, 0)]));
+        // Port 1 skipped by the dump for one sample, then back: it counts what it moved since
+        // it was last seen, not the 900 GB it moved in its life.
+        m.ingest(sample(at(1), vec![sock("10.0.0.1", 2, 0, 0)]));
+        m.ingest(sample(at(2), vec![sock("10.0.0.1", 1, 900_000 * MB + 4 * MB, 0), sock("10.0.0.1", 2, 0, 0)]));
+        let c = &m.clients[&"10.0.0.1".parse::<IpAddr>().unwrap()];
+        assert_eq!(c.read_bps, (4 * MB) as f64);
+        // The baseline is kept for MISSING_GRACE samples only.
+        for i in 0..=MISSING_GRACE as u64 {
+            m.ingest(sample(at(3 + i), vec![]));
+        }
+        assert!(m.prev.is_empty());
+    }
+
+    #[test]
+    fn socket_listed_twice_counts_once() {
+        let t0 = Instant::now();
+        let mut m = Model::default();
+        m.ingest(sample(t0, vec![sock("10.0.0.1", 1, 0, 0)]));
+        let k = sock("10.0.0.1", 1, 3 * MB, 0);
+        m.ingest(sample(t0 + Duration::from_secs(1), vec![k.clone(), k]));
+        let c = &m.clients[&"10.0.0.1".parse::<IpAddr>().unwrap()];
+        assert_eq!(c.read_bps, (3 * MB) as f64);
+        assert_eq!((c.conns.len(), c.read_total), (1, 3 * MB));
     }
 
     #[test]
@@ -815,7 +891,7 @@ mod tests {
         });
         let c = &m.clients[&ip1()];
         assert_eq!(c.health.rwnd_pct, Some(30.0));
-        assert_eq!(c.conn_health[&1].sndbuf_pct, Some(10.0));
+        assert_eq!(c.conn_health[&(1, None)].sndbuf_pct, Some(10.0));
         assert_eq!(c.flags(), vec![Flag::Rwnd]);
         // Idle connection (no busy time this interval): no verdict.
         let m = run(3, |_, k| {

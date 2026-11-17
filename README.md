@@ -32,7 +32,7 @@ The third header line is **nfsd server health**: `nfsd 14/128 busy ↑41  4.1k o
   on the exported filesystem. nfscope takes about 10 snapshots of the thread states per
   interval from `/proc/<pid>/stat`, so short bursts are not missed. **↑41** is the busiest
   snapshot.
-* The colour follows the average: yellow at 50%, red at 80%. It also turns red whenever every
+* The colour follows the average: orange at 50%, red at 80%. It also turns red whenever every
   thread was busy in at least 10% of the snapshots.
 * In the `o` panel, **Saturated** is the share of snapshots with no idle thread.
   * If saturation is often high, the server needs more threads (`rpc.nfsd N`, or `threads=`
@@ -62,7 +62,7 @@ kernels everything else works and the views below explain why this one is missin
 * **THREADS** column in the client list: nfsd threads busy with this client's requests,
   averaged over the interval (each request counts once per snapshot it appears in). It is
   request rate × request time, so a client with modest throughput but slow requests can hold
-  more threads than the busiest one by MiB/s. Yellow means one of its requests has been
+  more threads than the busiest one by MiB/s. Orange means one of its requests has been
   running for a second or more. Sortable like the other columns.
 * **`i`** opens the in-flight panel (`o` and `i` switch between the two server panels):
   * threads held per client and per operation (a COMPOUND is named by its first real op,
@@ -78,8 +78,19 @@ kernels everything else works and the views below explain why this one is missin
 * **READ** = server → client (the client is reading); **WRITE** = client → server.
 * Rates come from per-socket TCP counters (`ss -tni`: `bytes_acked` / `bytes_received`)
   on port 2049. They are diffed every tick and summed per client IP, so nconnect is handled.
+  A connection is identified by client address and port *and* the server address it reached,
+  so a server with several addresses (VIPs, bonds, NFSv4.1 trunking) is counted right even
+  when a client uses the same port towards two of them. A connection the socket dump skips
+  for a sample or two keeps its baseline, so it doesn't come back as one huge burst.
 * Host names come from reverse DNS (on a background pool) plus the NFSv4 client name from
-  `/proc/fs/nfsd/clients/*/info`.
+  `/proc/fs/nfsd/clients/*/info`. Failed lookups are retried after 2 minutes, and names are
+  looked up again every hour.
+* **Stale data is called out.** nfsd thread states, `pool_stats` and the in-flight dump are
+  read on a thread of their own, because the kernel serialises them with nfsd restarts and
+  resizes (`rpc.nfsd N`): with a thread stuck on hung storage those reads can hang. Client
+  rates then keep updating, and an orange banner says *nfsd not answering for 12s*. If no
+  sample arrives at all for twice the interval, a red banner says the sampler is stuck and
+  how old the numbers on screen are.
 * The **FLAGS** column marks TCP trouble on a client's connections. It reads the same
   `ss -tni` output, so it costs nothing extra. A flag shows only after its condition holds for
   2 ticks in a row:
@@ -88,7 +99,7 @@ kernels everything else works and the views below explain why this one is missin
   |---|---|---|
   | `Q` (red) | Recv-Q ≥ 1 MiB | requests are piling up unread: **the server is behind** on this client |
   | `S` | Send-Q ≥ 4 MiB | replies are piling up: the client is slow to take them |
-  | `L` (yellow) | ≥ 1 retransmit/s, or lost segments | packet loss on the path |
+  | `L` (orange) | ≥ 1 retransmit/s, or lost segments | packet loss on the path |
   | `W` | ≥ 20% of busy time `rwnd_limited` | the client's receive window is the limit |
   | `B` | ≥ 20% of busy time `sndbuf_limited` | the server's socket send buffer is too small |
 
@@ -97,7 +108,9 @@ kernels everything else works and the views below explain why this one is missin
 * **Enter** on a client opens a drill-down with:
   * read/write history chart
   * NFSv4 client record (version, lease, callback, kernel)
-  * per-connection TCP stats (RTT, retransmits/s, Recv-Q / Send-Q, RWND%, cwnd) and what each active flag means
+  * per-connection TCP stats (RTT, retransmits/s, Recv-Q / Send-Q, RWND%, cwnd) and what each active flag means.
+    One row per connection, as many as the screen allows. When a client reaches more than one
+    server address, a SERVER column says which.
   * tree of the client's open state from `/proc/fs/nfsd/clients/<id>/states`, grouped
     by export mount point and then directory
 
@@ -181,12 +194,14 @@ ssh -t root@SERVER nfscope
 ```
 
 ```
-nfscope [-i SECS] [--port 2049] [--no-dns] [--log /tmp/nfscope.log] [--fixture DIR]
+nfscope [-i SECS (1-60)] [--port 2049] [--no-dns] [--no-mouse] [--log /var/log/nfscope.log] [--fixture DIR]
 ```
 
 Root is needed to read `/proc/fs/nfsd/clients/*`. Without it, rates still work from
 `ss` and a banner explains what's missing. Logs go to `--log` (filter with `RUST_LOG`,
-e.g. `RUST_LOG=debug`), and are also visible in the `l` pane.
+e.g. `RUST_LOG=debug`), and are also visible in the `l` pane. A new log file is created
+readable by root only (it names clients), and nfscope won't write through a symlink. If the
+file can't be opened (not root, say), the `l` pane says so.
 
 ## Development
 

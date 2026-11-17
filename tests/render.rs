@@ -823,3 +823,77 @@ fn detail_ops_rows_keep_a_fixed_order() {
     let (_, l) = find(&b, "│LOOKUP ");
     assert!(r < g && g < l, "{b}");
 }
+
+#[test]
+fn detail_names_the_server_address_when_there_are_several() {
+    let (mut app, mut src) = fixture_app();
+    let ip: IpAddr = "10.20.1.11".parse().unwrap();
+    let text = |app: &mut App| format!("{}", render(app, 130, 40));
+    app.open_detail(ip);
+    run_actions(&mut app, &mut src);
+    assert!(!text(&mut app).contains("SERVER"), "one server address: no column");
+    let c = app.model.clients.get_mut(&ip).unwrap();
+    c.conns[1].local = Some("10.20.0.2".parse().unwrap());
+    let out = text(&mut app);
+    assert!(out.contains("SERVER") && out.contains("10.20.0.2") && out.contains("10.20.0.1"), "{out}");
+}
+
+#[test]
+fn stuck_sampler_and_stalled_nfsd_are_called_out() {
+    let (mut app, _) = fixture_app();
+    let text = |app: &mut App| format!("{}", render(app, 170, 20));
+    assert!(!text(&mut app).contains("⚠"));
+    // Probe stuck: rates still come, the nfsd figures don't.
+    app.model.nfsd_stalled = Some(Duration::from_secs(12));
+    let out = text(&mut app);
+    assert!(out.contains("nfsd not answering for 12s"), "{out}");
+    // No sample at all for well past the interval (2 s here).
+    app.last_sample_at = Some(Instant::now() - Duration::from_secs(9));
+    let out = text(&mut app);
+    assert!(out.contains("no new sample for 9s: the sampler is stuck"), "{out}");
+    assert!(out.contains("Everything shown is from 12:00:02"), "{out}");
+    app.last_sample_at = Some(Instant::now());
+    assert!(!text(&mut app).contains("sampler is stuck"));
+}
+
+#[test]
+fn dns_failures_are_retried_and_names_refreshed() {
+    use nfscope::app::{DNS_REFRESH, DNS_RETRY, Dns};
+    let (mut app, _) = fixture_app();
+    let ip: IpAddr = "10.20.1.11".parse().unwrap();
+    let resolves = |app: &mut App| std::mem::take(&mut app.actions).contains(&Action::Resolve(ip));
+    let t0 = Instant::now();
+    app.actions.clear();
+    app.dns.insert(ip, Dns::Failed); // the lookup fixture_app sent just now failed
+    // fixture_app asked just now: no retry until DNS_RETRY has passed.
+    app.request_dns(t0);
+    assert!(!resolves(&mut app));
+    app.request_dns(t0 + DNS_RETRY + Duration::from_secs(1));
+    assert!(resolves(&mut app));
+    app.on_dns(ip, Some("new-name".into()));
+    // A name is looked up again after DNS_REFRESH, and stays shown meanwhile.
+    let later = t0 + DNS_RETRY + DNS_REFRESH + Duration::from_secs(2);
+    app.request_dns(later);
+    assert!(resolves(&mut app));
+    assert_eq!(app.dns[&ip], Dns::Name("new-name".into()));
+    // A failed refresh keeps it.
+    app.on_dns(ip, None);
+    assert_eq!(app.dns[&ip], Dns::Name("new-name".into()));
+}
+
+#[test]
+fn clicks_and_shortcuts_while_typing_a_filter() {
+    let (mut app, _) = fixture_app();
+    key(&mut app, KeyCode::Char('/'));
+    key(&mut app, KeyCode::Char('g'));
+    app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+    app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT));
+    assert_eq!(app.filter, "gP", "Ctrl/Alt keys are not text");
+    // Clicking the nfsd header line opens the panel and leaves the filter alone.
+    let b = render(&mut app, 150, 20);
+    click_at(&mut app, find(&b, "busy"), Instant::now());
+    assert!(app.show_ops);
+    assert_eq!(app.filter, "gP");
+    assert!(!app.filter_editing);
+}

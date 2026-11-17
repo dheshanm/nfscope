@@ -1,6 +1,6 @@
 [package]
 name = "nfscope"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "Live top-like TUI for NFS server client I/O"
 

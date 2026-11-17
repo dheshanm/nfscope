@@ -460,6 +460,27 @@ pub fn footer(f: &mut Frame, area: Rect, pairs: &[(&str, &str, Option<KeyCode>)]
 
 pub fn status_lines(app: &App) -> Vec<Line<'static>> {
     let mut v = Vec::new();
+    if let Some(age) = app.stale_for() {
+        let since = app.model.last_wall.as_deref().map_or(String::new(), |w| format!(" Everything shown is from {w}."));
+        v.push(
+            Line::from(format!(
+                " ⚠ no new sample for {}: the sampler is stuck (a /proc read or `ss` is blocked).{since}",
+                crate::fmt::duration(age.as_secs_f64())
+            ))
+            .black()
+            .on_red(),
+        );
+    }
+    if let Some(d) = app.model.nfsd_stalled {
+        v.push(
+            Line::from(format!(
+                " ⚠ nfsd not answering for {} (restarting, or threads stuck on storage?): busy threads and \
+                 in-flight requests are missing; client rates are live.",
+                crate::fmt::duration(d.as_secs_f64())
+            ))
+            .fg(WARN),
+        );
+    }
     if let Some(e) = &app.model.sock_error {
         v.push(Line::from(format!(" ⚠ socket sampling failed: {e}")).red());
     }

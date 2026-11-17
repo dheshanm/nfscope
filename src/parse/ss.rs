@@ -7,8 +7,13 @@ use std::net::IpAddr;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Sock {
+    /// Client (peer) address.
     pub ip: Option<IpAddr>,
+    /// Client (peer) port.
     pub port: u16,
+    /// Server (local) address the client connected to. A server with several addresses (VIPs,
+    /// bonds, NFSv4.1 trunking) can see the same client port on two of them.
+    pub local: Option<IpAddr>,
     /// Bytes the client has acknowledged receiving (server → client, i.e. client READ).
     pub bytes_acked: u64,
     /// Bytes the server has received (client → server, i.e. client WRITE).
@@ -31,6 +36,16 @@ pub struct Sock {
     pub busy_ms: Option<u64>,
     pub rwnd_limited_ms: Option<u64>,
     pub sndbuf_limited_ms: Option<u64>,
+}
+
+/// Identifies one connection within a sample: client address and port, server address.
+pub type ConnKey = (IpAddr, u16, Option<IpAddr>);
+
+impl Sock {
+    /// None for a socket whose client address could not be parsed.
+    pub fn key(&self) -> Option<ConnKey> {
+        Some((self.ip?, self.port, self.local))
+    }
 }
 
 /// Split `addr:port`, handling `[v6]:port`, bare `::ffff:1.2.3.4:port` and `%iface` suffixes.
@@ -71,12 +86,13 @@ pub fn parse_ss(text: &str) -> Vec<Sock> {
                 Some((ip, port)) => (Some(ip), port),
                 None => (None, 0),
             };
+            let local = at.and_then(|i| parse_endpoint(toks[i])).map(|(ip, _)| ip);
             // `[State] Recv-Q Send-Q Local Peer`: the queues are the two numbers before Local.
             let (recv_q, send_q) = match at {
                 Some(i) if i >= 2 => (toks[i - 2].parse().unwrap_or(0), toks[i - 1].parse().unwrap_or(0)),
                 _ => (0, 0),
             };
-            out.push(Sock { ip, port, recv_q, send_q, ..Default::default() });
+            out.push(Sock { ip, port, local, recv_q, send_q, ..Default::default() });
             continue;
         }
         let Some(sock) = out.last_mut() else { continue };
@@ -105,16 +121,20 @@ pub fn parse_ss(text: &str) -> Vec<Sock> {
 }
 
 /// Render sockets back into `ss`-like text (used by the fixture source to synthesise samples).
+/// Each socket's own server address is used when known, else `local` (`addr:port`).
 pub fn render_ss(socks: &[Sock], local: &str) -> String {
     use std::fmt::Write;
+    let endpoint = |ip: IpAddr, port: u16| match ip {
+        IpAddr::V4(v4) => format!("{v4}:{port}"),
+        IpAddr::V6(v6) => format!("[{v6}]:{port}"),
+    };
+    let local_port = parse_endpoint(local).map_or(2049, |(_, p)| p);
     let mut s = String::new();
     for k in socks {
         let Some(ip) = k.ip else { continue };
-        let peer = match ip {
-            IpAddr::V4(v4) => format!("{v4}:{}", k.port),
-            IpAddr::V6(v6) => format!("[{v6}]:{}", k.port),
-        };
-        let _ = writeln!(s, "{}      {}      {local}      {peer}", k.recv_q, k.send_q);
+        let peer = endpoint(ip, k.port);
+        let here = k.local.map_or_else(|| local.to_string(), |l| endpoint(l, local_port));
+        let _ = writeln!(s, "{}      {}      {here}      {peer}", k.recv_q, k.send_q);
         let _ = write!(s, "\t cubic wscale:7,7 rto:201");
         if let Some(r) = k.rtt_ms {
             let _ = write!(s, " rtt:{r:.3}/0.05");
@@ -168,6 +188,8 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert_eq!(s[0].ip, Some("10.156.77.211".parse().unwrap()));
         assert_eq!(s[0].port, 707);
+        assert_eq!(s[0].local, Some("10.0.0.1".parse().unwrap()));
+        assert_eq!(s[1].local, Some("10.0.0.1".parse().unwrap()), "IPv4-mapped server address");
         assert_eq!(s[0].bytes_acked, 5000);
         assert_eq!(s[0].bytes_received, 1234);
         assert_eq!(s[0].rtt_ms, Some(0.317));

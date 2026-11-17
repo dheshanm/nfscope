@@ -18,6 +18,10 @@ use crate::workers::{FindMsg, FindReq};
 
 pub const INTERVALS: [u64; 8] = [1, 2, 3, 5, 10, 15, 30, 60];
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// A failed reverse lookup is tried again after this long.
+pub const DNS_RETRY: Duration = Duration::from_secs(120);
+/// A resolved name is looked up again after this long.
+pub const DNS_REFRESH: Duration = Duration::from_secs(3600);
 const WHEEL_LINES: usize = 3;
 
 /// Clickable regions recorded by the UI during the last draw.
@@ -161,11 +165,15 @@ pub struct App {
     pub hide_deleg: bool,
     pub dns_enabled: bool,
     pub dns: HashMap<IpAddr, Dns>,
+    /// When each address was last sent for a lookup.
+    dns_asked: HashMap<IpAddr, Instant>,
     pub throbber: ThrobberState,
     pub quit: bool,
     pub actions: Vec<Action>,
     pub matcher: Matcher,
     pub hit: HitMap,
+    /// When the last sample arrived (wall time on this machine), to notice a stuck sampler.
+    pub last_sample_at: Option<Instant>,
     last_click: Option<(Instant, Position)>,
     next_find_id: u64,
 }
@@ -191,11 +199,13 @@ impl App {
             hide_deleg: true,
             dns_enabled,
             dns: HashMap::new(),
+            dns_asked: HashMap::new(),
             throbber: ThrobberState::default(),
             quit: false,
             actions: Vec::new(),
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             hit: HitMap::default(),
+            last_sample_at: None,
             last_click: None,
             next_find_id: 0,
         }
@@ -204,17 +214,14 @@ impl App {
     // ---------------------------------------------------------------- data in
 
     pub fn on_sample(&mut self, s: RawSample) {
+        self.last_sample_at = Some(Instant::now());
         if self.paused {
             self.model.rebaseline(&s);
             return;
         }
         self.model.ingest(s);
         if self.dns_enabled {
-            let new: Vec<IpAddr> = self.model.clients.keys().filter(|ip| !self.dns.contains_key(ip)).copied().collect();
-            for ip in new {
-                self.dns.insert(ip, Dns::Pending);
-                self.actions.push(Action::Resolve(ip));
-            }
+            self.request_dns(Instant::now());
         }
         if let View::Detail(d) = &mut self.view
             && let Some(c) = self.model.clients.get(&d.ip)
@@ -223,8 +230,46 @@ impl App {
         }
     }
 
+    /// How long since the last sample, when that is well past the interval: the sampler is
+    /// stuck and everything on screen is old.
+    pub fn stale_for(&self) -> Option<Duration> {
+        let age = self.last_sample_at?.elapsed();
+        (age > self.interval * 2 + Duration::from_secs(1)).then_some(age)
+    }
+
+    /// Queue reverse lookups: new clients, failed lookups again after [`DNS_RETRY`], and names
+    /// again after [`DNS_REFRESH`] (addresses get reassigned). Clients gone that long are forgotten.
+    pub fn request_dns(&mut self, now: Instant) {
+        fn age(asked: &HashMap<IpAddr, Instant>, ip: &IpAddr, now: Instant) -> Duration {
+            asked.get(ip).map_or(Duration::MAX, |t| now.saturating_duration_since(*t))
+        }
+        let clients = &self.model.clients;
+        self.dns.retain(|ip, _| clients.contains_key(ip) || age(&self.dns_asked, ip, now) < DNS_REFRESH);
+        self.dns_asked.retain(|ip, _| self.dns.contains_key(ip));
+        for ip in clients.keys() {
+            let due = match self.dns.get(ip) {
+                None => true,
+                Some(Dns::Pending) => false,
+                Some(Dns::Failed) => age(&self.dns_asked, ip, now) >= DNS_RETRY,
+                Some(Dns::Name(_)) => age(&self.dns_asked, ip, now) >= DNS_REFRESH,
+            };
+            if due {
+                // A known name stays on screen while it is looked up again.
+                self.dns.entry(*ip).or_insert(Dns::Pending);
+                self.dns_asked.insert(*ip, now);
+                self.actions.push(Action::Resolve(*ip));
+            }
+        }
+    }
+
     pub fn on_dns(&mut self, ip: IpAddr, name: Option<String>) {
-        self.dns.insert(ip, name.map_or(Dns::Failed, Dns::Name));
+        match (name, self.dns.get(&ip)) {
+            // A failed refresh keeps the name we had.
+            (None, Some(Dns::Name(_))) => {}
+            (name, _) => {
+                self.dns.insert(ip, name.map_or(Dns::Failed, Dns::Name));
+            }
+        }
     }
 
     pub fn on_states(&mut self, ip: IpAddr, res: Result<OpenFiles, String>) {
@@ -471,6 +516,8 @@ impl App {
             KeyCode::Backspace => {
                 text.pop();
             }
+            // Ctrl/Alt combinations are commands, not text (Shift is just a capital).
+            KeyCode::Char(_) if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
             KeyCode::Char(c) => text.push(c),
             KeyCode::Up | KeyCode::Down => {
                 *editing = false;
@@ -581,14 +628,15 @@ impl App {
             self.close_overlay();
             return;
         }
-        if let Some(&(_, code)) = self.hit.buttons.iter().find(|(r, _)| r.contains(pos)) {
-            self.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
-            return;
-        }
-        // Clicking anywhere else finishes filter editing (keeping the filter text).
+        // Any click finishes filter editing (keeping the filter text), before a button's key
+        // is pressed: otherwise that key would be typed into the filter.
         match &mut self.view {
             View::Top => self.filter_editing = false,
             View::Detail(d) => d.filter_editing = false,
+        }
+        if let Some(&(_, code)) = self.hit.buttons.iter().find(|(r, _)| r.contains(pos)) {
+            self.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+            return;
         }
         match &mut self.view {
             View::Top => {

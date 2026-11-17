@@ -55,7 +55,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// Average nfsd threads the client held over the interval: dim `·` when none, bold from one
-/// whole thread, yellow when one of its requests has been running for a second or more.
+/// whole thread, orange when one of its requests has been running for a second or more.
 fn threads_cell(c: &crate::model::ClientStat) -> Cell<'static> {
     let Some(l) = &c.inflight else { return Cell::from("") };
     let style = match l {
