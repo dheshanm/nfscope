@@ -179,7 +179,7 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = "\
-0      0        10.0.0.1:2049        10.156.77.211:707
+0      0        10.0.0.1:2049        10.20.7.211:707
 \t cubic wscale:7,7 rto:201 rtt:0.317/0.05 ato:40 mss:8948 cwnd:10 bytes_sent:100 bytes_acked:5000 bytes_received:1234 segs_out:3 send 2.26Gbps lastsnd:12 lastrcv:34 lastack:12 retrans:0/7 rcv_space:1
 0      0   [::ffff:10.0.0.1]:2049   [::ffff:10.0.2.30]:801
 \t cubic rtt:1.5/0.1 bytes_acked:10 bytes_received:20
@@ -191,7 +191,7 @@ mod tests {
     fn parses_v4_mapped_and_v6() {
         let s = parse_ss(SAMPLE);
         assert_eq!(s.len(), 3);
-        assert_eq!(s[0].ip, Some("10.156.77.211".parse().unwrap()));
+        assert_eq!(s[0].ip, Some("10.20.7.211".parse().unwrap()));
         assert_eq!(s[0].port, 707);
         assert_eq!(s[0].local, Some("10.0.0.1".parse().unwrap()));
         assert_eq!(s[1].local, Some("10.0.0.1".parse().unwrap()), "IPv4-mapped server address");

@@ -2,7 +2,13 @@
 name = "nfscope"
 version = "0.1.7"
 edition = "2024"
-description = "Live top-like TUI for NFS server client I/O"
+description = "top for Linux NFS servers: per-client throughput, nfsd thread usage, in-flight requests and open files"
+license = "Unlicense"
+repository = "https://github.com/dheshanm/nfscope"
+readme = "README.md"
+keywords = ["nfs", "nfsd", "tui", "monitoring", "sysadmin"]
+categories = ["command-line-utilities", "filesystem", "os::linux-apis"]
+exclude = ["docs/*.png", "scratch/", "tests/fixtures/local/", ".claude/"]
 
 [dependencies]
 clap = { version = "4.6.8", features = ["derive"] }

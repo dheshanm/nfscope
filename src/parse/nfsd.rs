@@ -233,7 +233,7 @@ mod tests {
     use super::*;
 
     const INFO: &str = r#"clientid: 0x6d0f67a65f1c8e9e
-address: "10.156.77.211:707"
+address: "10.20.7.211:707"
 status: confirmed
 seconds from last renew: 23
 name: "Linux NFSv4.2 client-01.example.org"
@@ -242,13 +242,13 @@ Implementation domain: "kernel.org"
 Implementation name: "Linux 6.8.0-45-generic #45-Ubuntu SMP x86_64"
 Implementation time: [0, 0]
 callback state: UP
-callback address: 10.156.77.211:0
+callback address: 10.20.7.211:0
 "#;
 
     #[test]
     fn info() {
         let c = parse_info("42", INFO);
-        assert_eq!(c.ip, Some("10.156.77.211".parse().unwrap()));
+        assert_eq!(c.ip, Some("10.20.7.211".parse().unwrap()));
         assert_eq!(c.name.as_deref(), Some("Linux NFSv4.2 client-01.example.org"));
         assert_eq!(c.minor_version, Some(2));
         assert_eq!(c.status.as_deref(), Some("confirmed"));
