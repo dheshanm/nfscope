@@ -16,6 +16,17 @@ pub fn rate(bps: f64) -> String {
     format!("{}/s", bytes(bps.max(0.0).round() as u64))
 }
 
+/// Compact duration: `45s`, `2m30s`, `1h05m`.
+pub fn duration(secs: f64) -> String {
+    let s = secs.max(0.0).round() as u64;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 if s.is_multiple_of(60) => format!("{}m", s / 60),
+        60..3600 => format!("{}m{:02}s", s / 60, s % 60),
+        _ => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
 const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// Tiny text sparkline of total throughput for the last `n` points.
@@ -41,6 +52,14 @@ mod tests {
         assert_eq!(rate(0.0), "0.0 B/s");
         assert_eq!(rate(111.1 * 1048576.0), "111.1 MiB/s");
         assert_eq!(bytes(458_900_000_000), "427.4 GiB");
+    }
+
+    #[test]
+    fn durations() {
+        assert_eq!(duration(4.6), "5s");
+        assert_eq!(duration(120.0), "2m");
+        assert_eq!(duration(150.0), "2m30s");
+        assert_eq!(duration(3900.0), "1h05m");
     }
 
     #[test]

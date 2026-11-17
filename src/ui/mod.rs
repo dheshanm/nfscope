@@ -11,8 +11,21 @@ use crossterm::event::KeyCode;
 
 use crate::app::{App, HitMap, View};
 
-pub const READ: Color = Color::Cyan;
-pub const WRITE: Color = Color::Magenta;
+/// Read (server → client) is blue everywhere: numbers, labels, graphs, `r` access flags.
+pub const READ: Color = Color::Indexed(75); // #5fafff
+/// Write (client → server) is pink everywhere: numbers, labels, graphs, `w` access flags.
+pub const WRITE: Color = Color::Indexed(212); // #ff87d7
+
+/// `READ` / `WRITE` legend spans, colour-coded.
+pub fn legend() -> Vec<Span<'static>> {
+    vec![
+        Span::raw(" "),
+        Span::raw("READ").fg(READ).bold(),
+        Span::raw(" server→client · ").fg(DIM),
+        Span::raw("WRITE").fg(WRITE).bold(),
+        Span::raw(" client→server ").fg(DIM),
+    ]
+}
 pub const DIM: Color = Color::DarkGray;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -39,6 +52,33 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.show_help {
         help(f, area);
+    }
+}
+
+/// Right-aligned multi-row sparkline: `newest_first[0]` is drawn in the rightmost column.
+/// Columns with no sample yet, or a zero value, show a faint dotted baseline on the bottom row, so
+/// the graph reads as a timeline filling in from the right.
+pub fn sparkline(buf: &mut ratatui::buffer::Buffer, area: Rect, newest_first: &[f64], max: f64, color: Color) {
+    const BARS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    if area.is_empty() {
+        return;
+    }
+    let rows = area.height as f64;
+    for i in 0..area.width {
+        let x = area.right() - 1 - i;
+        let v = newest_first.get(i as usize).copied().unwrap_or(0.0);
+        // Height in eighths of a cell; any non-zero value gets at least one eighth.
+        let eighths = if v <= 0.0 || max <= 0.0 { 0 } else { ((v / max) * rows * 8.0).round().max(1.0) as u16 };
+        if eighths == 0 {
+            buf[(x, area.bottom() - 1)].set_symbol("·").set_fg(DIM);
+            continue;
+        }
+        for r in 0..area.height {
+            let level = eighths.saturating_sub(r * 8).min(8) as usize;
+            if level > 0 {
+                buf[(x, area.bottom() - 1 - r)].set_symbol(BARS[level]).set_fg(color);
+            }
+        }
     }
 }
 
@@ -96,7 +136,12 @@ fn help(f: &mut Frame, area: Rect) {
         ("q / Ctrl-C", "quit"),
     ];
     let mut lines = vec![
-        Line::from("READ = server→client (client reading), WRITE = client→server (client writing)").fg(DIM),
+        Line::from(vec![
+            Span::raw("READ").fg(READ).bold(),
+            Span::raw(" = server→client (client reading), ").fg(DIM),
+            Span::raw("WRITE").fg(WRITE).bold(),
+            Span::raw(" = client→server (client writing)").fg(DIM),
+        ]),
         Line::from("Totals are per currently-open TCP connection and reset when a client reconnects.").fg(DIM),
         Line::default(),
     ];

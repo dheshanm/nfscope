@@ -213,8 +213,8 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
             };
             Row::new(vec![
                 right(k.port.to_string()),
-                right(fmt::bytes(k.bytes_acked)),
-                right(fmt::bytes(k.bytes_received)),
+                right(fmt::bytes(k.bytes_acked)).fg(READ),
+                right(fmt::bytes(k.bytes_received)).fg(WRITE),
                 right(k.rtt_ms.map_or("-".into(), |r| format!("{r:.2} ms"))),
                 right(k.retrans.to_string()),
                 right(k.cwnd.map_or("-".into(), |c| c.to_string())),
@@ -225,8 +225,15 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
     let widths = [6, 11, 11, 10, 8, 6, 8].map(Constraint::Length);
     let table = Table::new(rows, widths)
         .header(
-            Row::new(hdr.map(|h| Cell::from(Line::from(h).alignment(Alignment::Right))))
-                .style(Style::new().bold().bg(Color::Indexed(236))),
+            Row::new(hdr.map(|h| {
+                let color = match h {
+                    "READ TOT" => READ,
+                    "WRITE TOT" => WRITE,
+                    _ => Color::Reset,
+                };
+                Cell::from(Line::from(h).alignment(Alignment::Right).fg(color))
+            }))
+            .style(Style::new().bold().bg(Color::Indexed(236))),
         )
         .block(Block::bordered().title(if conns.len() > fits {
             format!(" TCP connections ({}, busiest {fits} shown) ", conns.len())
@@ -237,16 +244,12 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
 }
 
 fn file_line(of: &OpenFile) -> Line<'static> {
-    let acc_style = match (of.read, of.write) {
-        (_, true) => Style::new().fg(Color::Yellow).bold(),
-        (true, false) => Style::new().fg(Color::Green),
-        _ => Style::new().fg(DIM),
-    };
     let kinds: Vec<&str> = of.kinds.iter().map(String::as_str).collect();
     let name =
         if deleg_only(of) { Span::raw(of.name.clone()).fg(Color::Gray) } else { Span::raw(of.name.clone()).bold() };
     Line::from(vec![
-        Span::styled(of.access().to_string(), acc_style),
+        if of.read { Span::raw("r").fg(READ).bold() } else { Span::raw("-").fg(DIM) },
+        if of.write { Span::raw("w").fg(WRITE).bold() } else { Span::raw("-").fg(DIM) },
         Span::raw(format!(" {:<12} ", kinds.join(","))).fg(DIM),
         name,
     ])
@@ -296,16 +299,14 @@ pub fn build_tree(
                         Span::raw(format!("  {} file{}", files.len(), if files.len() == 1 { "" } else { "s" })).fg(DIM),
                     ];
                     if writers > 0 {
-                        label.push(Span::raw(format!(" · {writers} writable")).yellow());
+                        label.push(Span::raw(format!(" · {writers} writable")).fg(WRITE));
                     }
                     let leaves = files.iter().map(|f| TreeItem::new_leaf(f.name.clone(), file_line(f))).collect();
                     TreeItem::new(dir.to_string(), Line::from(label), leaves).expect("unique file names per dir")
                 })
                 .collect();
-            let label = Line::from(vec![
-                Span::raw(export.to_string()).fg(Color::Blue).bold(),
-                Span::raw(format!("  {n_files} files")).fg(DIM),
-            ]);
+            let label =
+                Line::from(vec![Span::raw(export.to_string()).bold(), Span::raw(format!("  {n_files} files")).fg(DIM)]);
             TreeItem::new(export.to_string(), label, children).expect("unique dirs per export")
         })
         .collect();

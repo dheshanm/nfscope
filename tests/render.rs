@@ -353,3 +353,40 @@ fn mouse_footer_buttons() {
     click_at(&mut app, find(&b, "q quit"), t + Duration::from_secs(6));
     assert!(app.quit);
 }
+
+// ------------------------------------------------------------------ colours
+
+/// Blue = read, pink = write, everywhere they appear.
+#[test]
+fn read_write_colours_are_consistent() {
+    use nfscope::ui::{READ, WRITE};
+    let fg = |b: &TestBackend, pos: (u16, u16)| b.buffer()[pos].fg;
+
+    let (mut app, mut src) = fixture_app();
+    let b = render(&mut app, 150, 22);
+    // Header labels and their graphs.
+    let (x, y) = find(&b, "READ ");
+    assert_eq!(fg(&b, (x, y)), READ);
+    let (wx, wy) = find(&b, "WRITE  ");
+    assert_eq!(fg(&b, (wx, wy)), WRITE);
+    let right_edge = b.buffer().area.width - 2;
+    assert_eq!(fg(&b, (right_edge, y + 1)), READ, "newest READ bar at the right edge");
+    assert_eq!(fg(&b, (right_edge, wy + 1)), WRITE, "newest WRITE bar at the right edge");
+    // Table column headers and rate cells.
+    let (hx, hy) = find(&b, "READ/s");
+    assert_eq!(fg(&b, (hx, hy)), READ);
+    assert_eq!(fg(&b, find(&b, "WRITE/s")), WRITE);
+    assert_eq!(fg(&b, find(&b, "READ TOT")), READ);
+    assert_eq!(fg(&b, find(&b, "WRITE TOT")), WRITE);
+    assert_eq!(fg(&b, find(&b, "111.1 MiB/s")), READ);
+    assert_eq!(fg(&b, find(&b, "43.5 MiB/s")), WRITE);
+
+    // Drill-down: access flags in the tree.
+    app.open_detail("10.20.1.12".parse().unwrap());
+    run_actions(&mut app, &mut src);
+    let b = render(&mut app, 130, 40);
+    let (ax, ay) = find(&b, "rw open");
+    assert_eq!(fg(&b, (ax, ay)), READ);
+    assert_eq!(fg(&b, (ax + 1, ay)), WRITE);
+    assert_eq!(fg(&b, find(&b, "3 writable")), WRITE);
+}

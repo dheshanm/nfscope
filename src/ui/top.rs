@@ -2,13 +2,13 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Sparkline, Table};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use throbber_widgets_tui::Throbber;
 
 use crossterm::event::KeyCode;
 use ratatui::layout::Flex;
 
-use super::{DIM, READ, WRITE, footer as draw_footer, status_lines};
+use super::{DIM, READ, WRITE, footer as draw_footer, legend, status_lines};
 use crate::app::{App, SortKey};
 use crate::fmt;
 
@@ -17,7 +17,7 @@ const TREND_W: usize = 12;
 pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     let status = status_lines(app);
     let [header, banner, table, footer] = Layout::vertical([
-        Constraint::Length(4),
+        Constraint::Length(6),
         Constraint::Length(status.len() as u16),
         Constraint::Min(3),
         Constraint::Length(1),
@@ -52,47 +52,85 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+/// Header: summary on the left, server-wide READ / WRITE history on the right.
+///
+/// The two sparklines share one scale so their heights compare directly; newest sample is at
+/// the right edge, and the border shows the time window and the scale.
 fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::bordered()
         .title(Line::from(vec![" nfscope ".bold(), format!("· {} ", app.server_name).into()]))
-        .title(Line::from(" READ = server→client · WRITE = client→server ").fg(DIM).right_aligned());
+        .title(Line::from(legend()).right_aligned());
     let inner = block.inner(area);
-    f.render_widget(block, area);
-    let [text, spark] = Layout::horizontal([Constraint::Min(50), Constraint::Percentage(40)]).areas(inner);
+    let [text, graphs] = Layout::horizontal([Constraint::Length(34), Constraint::Fill(1)]).spacing(2).areas(inner);
 
+    // ---- left: summary
     let active = app.model.clients.values().filter(|c| c.total_bps() > 0.0).count();
-    let mut l1 = vec![
-        Span::raw(format!("Clients {} ", app.model.clients.len())),
-        Span::raw(format!("({active} active)   ")).fg(DIM),
-        Span::raw(format!("Interval {}s   ", app.interval.as_secs())),
-    ];
+    let mut l2 = vec![Span::raw(format!("Interval {}s  ", app.interval.as_secs()))];
     if app.paused {
-        l1.push(" PAUSED ".black().on_yellow());
-        l1.push(Span::raw(" "));
+        l2.push(" PAUSED ".black().on_yellow());
+    } else if let Some(w) = &app.model.last_wall {
+        l2.push(Span::raw(format!("updated {w}")).fg(DIM));
     }
-    if let Some(w) = &app.model.last_wall {
-        l1.push(Span::raw(format!("updated {w}")).fg(DIM));
-    }
-    let l2 = if app.model.has_rates() {
+    let total = if app.model.has_rates() {
         let (r, w) = app.model.total_rates();
-        Line::from(vec![
-            Span::raw("READ ").fg(READ).bold(),
-            Span::raw(format!("{:<14}", fmt::rate(r))),
-            Span::raw("WRITE ").fg(WRITE).bold(),
-            Span::raw(format!("{:<14}", fmt::rate(w))),
-            Span::raw("TOTAL ").bold(),
-            Span::raw(fmt::rate(r + w)),
-        ])
+        Line::from(vec![Span::raw("TOTAL ").bold(), Span::raw(fmt::rate(r + w)).bold()])
     } else {
-        let t = Throbber::default().label("collecting first interval…");
+        let t = Throbber::default();
         Line::from(vec![t.to_symbol_span(&app.throbber), Span::raw(" collecting first interval…").fg(DIM)])
     };
-    f.render_widget(Paragraph::new(vec![Line::from(l1), l2]), text);
+    let lines = vec![
+        Line::from(vec![
+            Span::raw(format!("Clients {} ", app.model.clients.len())),
+            Span::raw(format!("({active} active)")).fg(DIM),
+        ]),
+        Line::from(l2),
+        Line::default(),
+        total,
+    ];
+    f.render_widget(Paragraph::new(lines), text);
 
-    let n = spark.width as usize;
-    let data: Vec<u64> =
-        app.model.total.iter().skip(app.model.total.len().saturating_sub(n)).map(|p| p.total() as u64).collect();
-    f.render_widget(Sparkline::default().data(&data).style(Style::new().fg(Color::Green)), spark);
+    // ---- right: READ above WRITE, each 2 rows tall, label + current rate + sparkline
+    const LABEL_W: u16 = 19;
+    let [read_row, write_row] = Layout::vertical([Constraint::Length(2), Constraint::Length(2)]).areas(graphs);
+    let spark_w = graphs.width.saturating_sub(LABEL_W) as usize;
+    let hist = &app.model.total;
+    let visible: Vec<_> = hist.iter().rev().take(spark_w).collect(); // newest first
+    let scale = visible.iter().map(|p| p.read.max(p.write)).fold(0.0, f64::max);
+    let (cur_r, cur_w) = app.model.total_rates();
+    for (row, name, color, cur, pick) in [
+        (read_row, "READ", READ, cur_r, (|p: &crate::model::Point| p.read) as fn(&crate::model::Point) -> f64),
+        (write_row, "WRITE", WRITE, cur_w, |p: &crate::model::Point| p.write),
+    ] {
+        let [label, spark] = Layout::horizontal([Constraint::Length(LABEL_W), Constraint::Fill(1)]).areas(row);
+        let rate = if app.model.has_rates() { fmt::rate(cur) } else { "…".into() };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(format!("{name:<6}")).fg(color).bold(),
+                Span::raw(format!("{rate:>12}")).fg(color),
+            ])),
+            label,
+        );
+        let data: Vec<f64> = visible.iter().map(|p| pick(p)).collect();
+        super::sparkline(f.buffer_mut(), spark, &data, scale, color);
+    }
+
+    // ---- border caption: what the graph covers
+    let mut block = block;
+    if let (Some(newest), Some(oldest)) = (visible.first(), visible.last()) {
+        let window = if visible.len() >= 2 {
+            format!("last {}", fmt::duration(newest.t - oldest.t))
+        } else {
+            "newest at right".to_string()
+        };
+        block = block.title_bottom(
+            Line::from(vec![
+                Span::raw(format!(" ◀ {window} · ")).fg(DIM),
+                Span::raw(format!("full height = {} ", fmt::rate(scale))).fg(DIM),
+            ])
+            .right_aligned(),
+        );
+    }
+    f.render_widget(block, area);
 }
 
 fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
@@ -124,8 +162,13 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
             _ => "",
         };
         let text = format!("{name}{arrow}");
-        let style =
+        let mut style =
             if key.is_some_and(|k| k == app.sort) { Style::new().bold().underlined() } else { Style::new().bold() };
+        match key {
+            Some(SortKey::Read | SortKey::ReadTot) => style = style.fg(READ),
+            Some(SortKey::Write | SortKey::WriteTot) => style = style.fg(WRITE),
+            _ => {}
+        }
         let line = Line::from(text).style(style);
         Cell::from(if (1..8).contains(&i) && i != 4 { line.alignment(Alignment::Right) } else { line })
     }))
@@ -157,7 +200,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
                 num(c.read_bps, READ),
                 num(c.write_bps, WRITE),
                 if has_rates { right(fmt::rate(c.total_bps()), total_style) } else { right("…".into(), total_style) },
-                Cell::from(fmt::trend(&c.history, TREND_W)).style(Style::new().fg(Color::Green)),
+                Cell::from(fmt::trend(&c.history, TREND_W)).style(Style::new().fg(Color::Gray)),
                 right(fmt::bytes(c.read_total), Style::new()),
                 right(fmt::bytes(c.write_total), Style::new()),
                 right(c.conns.len().to_string(), Style::new()),

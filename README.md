@@ -5,14 +5,25 @@ right now, and what each one has open. It runs **on the NFS server itself** (as 
 no SSH round-trips, no 30-second sampling windows.
 
 ```
-┌ nfscope · nfs-server ─────────────────────────────── READ = server→client · WRITE = client→server ┐
-│Clients 31 (7 active)   Interval 2s   updated 10:06:15                          █▂                 │
-│READ 68.5 MiB/s    WRITE 27.9 MiB/s    TOTAL 96.4 MiB/s                         ██                 │
-└───────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌ Clients (31) ─────────────────────────────────────────────────────────────────────────────────────┐
-│CLIENT            READ/s      WRITE/s    TOTAL/s ▼ TREND          READ TOT  WRITE TOT  CONN HOST   │
+┌ nfscope · nfs-server ──────────────────────────────── READ server→client · WRITE client→server ┐
+│Clients 31 (7 active)        READ    51.1 MiB/s                     ▁                           │
+│Interval 2s  updated 10:47:28                  ··················▄█▄▄▄▄▅▆▆▆▇▇▆▆▅▅▄▄▄▄▅▆▆▆▇│
+│                             WRITE   19.0 MiB/s                    █                            │
+│TOTAL 70.1 MiB/s                               ··················█▄▁▁▁▁▁▂▂▂▂▃▃▃▃▃▃▃▂▂▂▂▁▁▁▁▁▂│
+└──────────────────────────────────────────────────── ◀ last 1m16s · full height = 122.9 MiB/s ┘
+┌ Clients (31) ──────────────────────────────────────────────────────────────────────────────────┐
+│CLIENT            READ/s      WRITE/s    TOTAL/s ▼ TREND          READ TOT  WRITE TOT  CONN HOST │
 │10.20.1.11    50.0 MiB/s   16.5 MiB/s   66.5 MiB/s           █▇    2.4 TiB    2.4 TiB    16 client…│
 ```
+
+**Colours:** blue always means READ (server → client) and pink always means WRITE
+(client → server). This applies to the header graphs, the table columns, the drill-down chart
+and connection totals, and the `r`/`w` access flags in the open-files tree.
+
+The header graph shows **server-wide** throughput: the sum over all clients, with READ on top
+and WRITE below. Both graphs use one scale, so their heights compare directly. One column is
+one sample, and the newest sample is at the right edge. The bottom border shows how much time
+the graph covers and what full height means. Dots mark samples not collected yet, or idle periods.
 
 * **READ** = server → client (the client is reading); **WRITE** = client → server.
 * Rates come from per-socket TCP counters (`ss -tni`: `bytes_acked` / `bytes_received`)

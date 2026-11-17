@@ -1,17 +1,16 @@
 ---
 source: tests/render.rs
-assertion_line: 92
 expression: "render(&mut app, 150, 12)"
 ---
-"┌ nfscope · testserver ──────────────────────────────────────────────────────────────────────────────── READ = server→client · WRITE = client→server ┐"
-"│Clients 10 (7 active)   Interval 2s   updated 12:00:02                                   █                                                          │"
-"│READ 161.6 MiB/s   WRITE 48.3 MiB/s    TOTAL 209.9 MiB/s                                 █                                                          │"
-"└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
+"┌ nfscope · testserver ──────────────────────────────────────────────────────────────────────────────────── READ server→client · WRITE client→server ┐"
+"│Clients 10 (7 active)               READ   161.6 MiB/s                                                                                             █│"
+"│Interval 2s  updated 12:00:02                          ····························································································█│"
+"│                                    WRITE   48.3 MiB/s                                                                                              │"
+"│TOTAL 209.9 MiB/s                                      ····························································································▅│"
+"└───────────────────────────────────────────────────────────────────────────────────────────────────── ◀ newest at right · full height = 161.6 MiB/s ┘"
 "┌ Clients (2) filter: gpu ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
 "│CLIENT         READ/s ▼      WRITE/s      TOTAL/s TREND          READ TOT  WRITE TOT  CONN HOST  [NFSv4 client name]                                │"
 "│10.20.2.21      0.0 B/s      0.0 B/s      0.0 B/s                10.9 GiB   18.3 GiB     1 gpu-01.example.org  [Linux NFSv4.2 gpu-01.example.org]   │"
 "│10.20.2.22      0.0 B/s      0.0 B/s      0.0 B/s                   0.0 B      0.0 B     1 gpu-02.example.org  [Linux NFSv4.2 gpu-02.example.org]   │"
-"│                                                                                                                                                    │"
-"│                                                                                                                                                    │"
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
 "q quit  ↵ details  s/S sort  / filter  p pause  + slower  - faster  l log  ? help                                                                     "
