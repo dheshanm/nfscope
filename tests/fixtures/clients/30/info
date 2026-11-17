@@ -1,0 +1,11 @@
+clientid: 0x5f1c8e9e0000001e
+address: "10.20.3.30:708"
+status: confirmed
+seconds from last renew: 0
+name: "Linux NFSv4.2 mapped-01.example.org"
+minor version: 2
+Implementation domain: "kernel.org"
+Implementation name: "Linux 6.8.0-45-generic #45-Ubuntu SMP PREEMPT_DYNAMIC x86_64"
+Implementation time: [0, 0]
+callback state: UP
+callback address: 10.20.3.30:0

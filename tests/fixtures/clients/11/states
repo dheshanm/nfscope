@@ -1,0 +1,61 @@
+- 0x000000010000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1001", filename: "sub_001/scan_0000.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000020000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1001", filename: "sub_001/scan_0000.dcm" }
+- 0x000000030000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1002", filename: "sub_001/scan_0001.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000040000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1002", filename: "sub_001/scan_0001.dcm" }
+- 0x000000050000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1003", filename: "sub_001/scan_0002.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000060000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1003", filename: "sub_001/scan_0002.dcm" }
+- 0x000000070000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1004", filename: "sub_001/scan_0003.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000080000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1004", filename: "sub_001/scan_0003.dcm" }
+- 0x000000090000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1005", filename: "sub_001/scan_0004.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000000a0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1005", filename: "sub_001/scan_0004.dcm" }
+- 0x0000000b0000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1006", filename: "sub_001/scan_0005.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000000c0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1006", filename: "sub_001/scan_0005.dcm" }
+- 0x0000000d0000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1007", filename: "sub_001/scan_0006.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000000e0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1007", filename: "sub_001/scan_0006.dcm" }
+- 0x0000000f0000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1008", filename: "sub_001/scan_0007.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000100000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1008", filename: "sub_001/scan_0007.dcm" }
+- 0x000000110000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1009", filename: "sub_001/scan_0008.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000120000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1009", filename: "sub_001/scan_0008.dcm" }
+- 0x000000130000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:100a", filename: "sub_001/scan_0009.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000140000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:100a", filename: "sub_001/scan_0009.dcm" }
+- 0x000000150000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:100b", filename: "sub_001/scan_0010.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000160000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:100b", filename: "sub_001/scan_0010.dcm" }
+- 0x000000170000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:100c", filename: "sub_001/scan_0011.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000180000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:100c", filename: "sub_001/scan_0011.dcm" }
+- 0x000000190000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:100d", filename: "sub_001/scan_0012.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000001a0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:100d", filename: "sub_001/scan_0012.dcm" }
+- 0x0000001b0000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:100e", filename: "sub_001/scan_0013.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000001c0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:100e", filename: "sub_001/scan_0013.dcm" }
+- 0x0000001d0000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:100f", filename: "sub_002/scan_0000.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000001e0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:100f", filename: "sub_002/scan_0000.dcm" }
+- 0x0000001f0000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1010", filename: "sub_002/scan_0001.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000200000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1010", filename: "sub_002/scan_0001.dcm" }
+- 0x000000210000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1011", filename: "sub_002/scan_0002.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000220000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1011", filename: "sub_002/scan_0002.dcm" }
+- 0x000000230000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1012", filename: "sub_002/scan_0003.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000240000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1012", filename: "sub_002/scan_0003.dcm" }
+- 0x000000250000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1013", filename: "sub_002/scan_0004.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000260000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1013", filename: "sub_002/scan_0004.dcm" }
+- 0x000000270000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1014", filename: "sub_002/scan_0005.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000280000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1014", filename: "sub_002/scan_0005.dcm" }
+- 0x000000290000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1015", filename: "sub_002/scan_0006.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000002a0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1015", filename: "sub_002/scan_0006.dcm" }
+- 0x0000002b0000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1016", filename: "sub_002/scan_0007.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000002c0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1016", filename: "sub_002/scan_0007.dcm" }
+- 0x0000002d0000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1017", filename: "sub_002/scan_0008.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000002e0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1017", filename: "sub_002/scan_0008.dcm" }
+- 0x0000002f0000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1018", filename: "sub_017/scan_0000.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000300000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1018", filename: "sub_017/scan_0000.dcm" }
+- 0x000000310000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:1019", filename: "sub_017/scan_0001.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000320000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1019", filename: "sub_017/scan_0001.dcm" }
+- 0x000000330000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:101a", filename: "sub_017/scan_0002.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000340000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:101a", filename: "sub_017/scan_0002.dcm" }
+- 0x000000350000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:101b", filename: "sub_017/scan_0003.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000360000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:101b", filename: "sub_017/scan_0003.dcm" }
+- 0x000000370000000b5f1c8e9e: { type: open, access: r, deny: --, superblock: "fd:10:101c", filename: "sub_017/scan_0004.dcm", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000380000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:101c", filename: "sub_017/scan_0004.dcm" }
+- 0x000000390000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1800", filename: "sub_020/cached_0.nii.gz" }
+- 0x0000003a0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1801", filename: "sub_020/cached_1.nii.gz" }
+- 0x0000003b0000000b5f1c8e9e: { type: deleg, access: r, superblock: "fd:10:1802", filename: "sub_020/cached_2.nii.gz" }
+- 0x0000003c0000000b5f1c8e9e: { type: open, access: rw, deny: --, superblock: "fd:11:2001", filename: "derivatives/qc_report.json", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x0000003d0000000b5f1c8e9e: { type: open, access: rw, deny: --, superblock: "fd:11:2002", filename: "derivatives/run.log", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }

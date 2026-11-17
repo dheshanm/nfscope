@@ -1,0 +1,9 @@
+- 0x000000010000000c5f1c8e9e: { type: open, access: rw, deny: --, superblock: "fd:10:3000", filename: "recon_0/chunk_000.nii.gz", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000020000000c5f1c8e9e: { type: open, access: rw, deny: --, superblock: "fd:10:3001", filename: "recon_0/chunk_001.nii.gz", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000030000000c5f1c8e9e: { type: open, access: rw, deny: --, superblock: "fd:10:3002", filename: "recon_0/chunk_002.nii.gz", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000040000000c5f1c8e9e: { type: open, access: rw, deny: --, superblock: "fd:10:3003", filename: "recon_1/chunk_003.nii.gz", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000050000000c5f1c8e9e: { type: open, access: rw, deny: --, superblock: "fd:10:3004", filename: "recon_1/chunk_004.nii.gz", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000060000000c5f1c8e9e: { type: open, access: rw, deny: --, superblock: "fd:10:3005", filename: "recon_1/chunk_005.nii.gz", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000070000000c5f1c8e9e: { type: open, access: w, deny: --, superblock: "fd:11:3100", filename: "logs/pipeline.log", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000080000000c5f1c8e9e: { type: lock, superblock: "fd:11:3100", filename: "logs/pipeline.log", owner: "lock id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000090000000c5f1c8e9e: { type: layout, superblock: "fd:10:3001", filename: "recon_0/chunk_001.nii.gz" }

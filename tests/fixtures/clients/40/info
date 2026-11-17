@@ -1,0 +1,11 @@
+clientid: 0x5f1c8e9e00000028
+address: "[2001:db8::40]:709"
+status: confirmed
+seconds from last renew: 10
+name: "Linux NFSv4.2 v6-01.example.org"
+minor version: 2
+Implementation domain: "kernel.org"
+Implementation name: "Linux 6.8.0-45-generic #45-Ubuntu SMP PREEMPT_DYNAMIC x86_64"
+Implementation time: [0, 0]
+callback state: UP
+callback address: [2001:db8::40]:0

@@ -1,0 +1,213 @@
+//! Snapshot tests: replay the fixtures through the real model/app and render to a TestBackend.
+
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use nfscope::app::{Action, App, SortKey};
+use nfscope::files;
+use nfscope::source::{FixtureSource, Source};
+use nfscope::workers::collect;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+
+fn fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// Run queued actions synchronously against the fixture source.
+fn run_actions(app: &mut App, src: &mut FixtureSource) {
+    for a in std::mem::take(&mut app.actions) {
+        match a {
+            Action::Resolve(ip) => {
+                let n = src.resolve(ip);
+                app.on_dns(ip, n);
+            }
+            Action::LoadStates(ip) => {
+                let r = files::load(src, ip);
+                app.on_states(ip, r);
+            }
+            Action::SetInterval(_) => {}
+        }
+    }
+}
+
+fn fixture_app() -> (App, FixtureSource) {
+    let mut src = FixtureSource::new(fixture_dir());
+    let mut app = App::new("testserver".into(), Duration::from_secs(2), true);
+    let t0 = Instant::now();
+    for i in 0..2u64 {
+        let mut s = collect(&mut src, 2049);
+        s.mono = t0 + Duration::from_secs(2 * i);
+        s.wall = format!("12:00:0{}", 2 * i);
+        app.on_sample(s);
+    }
+    run_actions(&mut app, &mut src);
+    (app, src)
+}
+
+fn render(app: &mut App, w: u16, h: u16) -> TestBackend {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| nfscope::ui::draw(f, app)).unwrap();
+    t.backend().clone()
+}
+
+fn key(app: &mut App, c: KeyCode) {
+    app.handle_key(KeyEvent::new(c, KeyModifiers::NONE));
+}
+
+#[test]
+fn top_view() {
+    let (mut app, _) = fixture_app();
+    insta::assert_snapshot!(render(&mut app, 150, 20));
+}
+
+#[test]
+fn top_rates_match_fixture() {
+    let (mut app, _) = fixture_app();
+    let rows = app.rows();
+    // Default sort is TOTAL desc; client-01 has two nconnect sockets at 60 + 51.1 MiB/s.
+    assert_eq!(rows[0].ip, "10.20.1.11".parse::<IpAddr>().unwrap());
+    assert_eq!(rows[0].conns.len(), 2);
+    assert!((rows[0].read_bps / 1048576.0 - 111.1).abs() < 0.01);
+    assert_eq!(rows[1].ip, "10.20.1.12".parse::<IpAddr>().unwrap());
+    // IPv4-mapped peer is folded into its IPv4 address and matched to its NFSv4 record.
+    let mapped = rows.iter().find(|c| c.ip == "10.20.3.30".parse::<IpAddr>().unwrap()).unwrap();
+    assert_eq!(mapped.nfs_name(), Some("Linux NFSv4.2 mapped-01.example.org"));
+}
+
+#[test]
+fn sort_cycle_and_filter() {
+    let (mut app, _) = fixture_app();
+    key(&mut app, KeyCode::Char('s'));
+    assert_eq!(app.sort, SortKey::Read);
+    key(&mut app, KeyCode::Char('/'));
+    for c in "gpu".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    key(&mut app, KeyCode::Enter);
+    let ips: Vec<String> = app.rows().iter().map(|c| c.ip.to_string()).collect();
+    assert_eq!(ips, ["10.20.2.21", "10.20.2.22"]);
+    insta::assert_snapshot!(render(&mut app, 150, 12));
+}
+
+#[test]
+fn detail_view() {
+    let (mut app, mut src) = fixture_app();
+    key(&mut app, KeyCode::Enter); // top row = 10.20.1.11
+    assert!(app.actions.contains(&Action::LoadStates("10.20.1.11".parse().unwrap())));
+    run_actions(&mut app, &mut src);
+    insta::assert_snapshot!(render(&mut app, 130, 40));
+}
+
+#[test]
+fn detail_view_loading_and_nfsv3() {
+    let (mut app, mut src) = fixture_app();
+    app.open_detail("10.20.4.50".parse().unwrap());
+    let loading = render(&mut app, 110, 24);
+    assert!(format!("{loading}").contains("reading open state"));
+    run_actions(&mut app, &mut src);
+    insta::assert_snapshot!(render(&mut app, 110, 24));
+}
+
+#[test]
+fn detail_filter_files() {
+    let (mut app, mut src) = fixture_app();
+    app.open_detail("10.20.1.11".parse().unwrap());
+    run_actions(&mut app, &mut src);
+    key(&mut app, KeyCode::Char('/'));
+    for c in "log".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    let out = format!("{}", render(&mut app, 130, 40));
+    assert!(out.contains("run.log"));
+    assert!(!out.contains("scan_0000.dcm"));
+    key(&mut app, KeyCode::Esc); // clears filter + stops editing
+    key(&mut app, KeyCode::Esc); // back to top
+    assert!(matches!(app.view, nfscope::app::View::Top));
+}
+
+#[test]
+fn fixture_source_keeps_moving_after_replay() {
+    let mut src = FixtureSource::new(fixture_dir());
+    let parse = |t: String| nfscope::parse::ss::parse_ss(&t);
+    let mut prev = parse(src.sockets(2049).unwrap());
+    for _ in 0..5 {
+        let cur = parse(src.sockets(2049).unwrap());
+        assert_eq!(cur.len(), prev.len());
+        for (a, b) in prev.iter().zip(&cur) {
+            assert!(b.bytes_acked >= a.bytes_acked && b.bytes_received >= a.bytes_received);
+        }
+        prev = cur;
+    }
+}
+
+/// Sanity-check the parsers against a real capture in `tests/fixtures/local/` if one exists
+/// (gitignored; see README for how to capture one).
+#[test]
+fn local_capture_parses() {
+    use nfscope::parse::nfsd::{parse_info, parse_mountinfo, parse_states};
+    let dir = fixture_dir().join("local");
+    if !dir.join("ss").exists() {
+        eprintln!("no local capture; skipping");
+        return;
+    }
+    let mut src = FixtureSource::new(dir.clone());
+    let socks = nfscope::parse::ss::parse_ss(&src.sockets(2049).unwrap());
+    assert!(!socks.is_empty());
+    let raw_headers = std::fs::read_to_string(dir.join("ss/001.txt"))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with(char::is_whitespace) && !l.trim().is_empty())
+        .count();
+    assert_eq!(socks.len(), raw_headers, "every socket header parsed");
+    assert!(socks.iter().all(|s| s.rtt_ms.is_some() && s.cwnd.is_some()));
+
+    let infos: Vec<_> = src.client_infos().unwrap().iter().map(|(id, t)| parse_info(id, t)).collect();
+    assert!(infos.iter().all(|c| c.ip.is_some() && c.name.is_some()), "{infos:#?}");
+
+    let mounts = parse_mountinfo(&src.mountinfo().unwrap());
+    let mut unresolved = std::collections::BTreeSet::new();
+    let mut n = 0;
+    for c in &infos {
+        for e in parse_states(&src.states(&c.id).unwrap()) {
+            n += 1;
+            assert!(e.filename.is_some(), "{e:?}");
+            let dev = e.dev.expect("superblock parsed");
+            if !mounts.contains_key(&dev) {
+                unresolved.insert(dev);
+            }
+        }
+    }
+    eprintln!("{} sockets, {} clients, {n} states, unresolved devs: {unresolved:?}", socks.len(), infos.len());
+    assert!(unresolved.is_empty());
+
+    // And the full pipeline renders without panicking.
+    let mut app = App::new("local".into(), Duration::from_secs(2), true);
+    let t0 = Instant::now();
+    for i in 0..3u64 {
+        let mut s = collect(&mut src, 2049);
+        s.mono = t0 + Duration::from_secs(2 * i);
+        app.on_sample(s);
+    }
+    run_actions(&mut app, &mut src);
+    let ip = app.rows()[0].ip;
+    app.open_detail(ip);
+    run_actions(&mut app, &mut src);
+    let _ = render(&mut app, 160, 50);
+}
+
+#[test]
+fn detail_hide_delegations() {
+    let (mut app, mut src) = fixture_app();
+    app.open_detail("10.20.1.11".parse().unwrap());
+    run_actions(&mut app, &mut src);
+    let before = format!("{}", render(&mut app, 130, 40));
+    assert!(before.contains("Open files: 33 in 5 dirs"));
+    key(&mut app, KeyCode::Char('d'));
+    let after = format!("{}", render(&mut app, 130, 40));
+    // The three cached_*.nii.gz files are held only as delegations.
+    assert!(after.contains("delegation-only hidden (30 shown)"), "{after}");
+    assert!(!after.contains("sub_020"));
+}

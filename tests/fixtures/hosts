@@ -1,0 +1,10 @@
+# ip name  (fixture reverse DNS)
+10.20.1.11 client-01.example.org
+10.20.1.12 client-02.example.org
+10.20.1.13 client-03.example.org
+10.20.1.14 client-04.example.org
+10.20.2.21 gpu-01.example.org
+10.20.2.22 gpu-02.example.org
+10.20.3.30 mapped-01.example.org
+2001:db8::40 v6-01.example.org
+10.20.4.50 legacy-nfs3.example.org
