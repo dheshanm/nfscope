@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use crate::parse::nfsd::ClientInfo;
+use crate::parse::rpc::{NfsdStats, ThreadStates};
 use crate::parse::ss::Sock;
 
 /// Number of rate samples kept per client for sparklines/charts.
@@ -18,6 +19,34 @@ pub struct RawSample {
     pub wall: String,
     pub socks: Result<Vec<Sock>, String>,
     pub clients: Result<Vec<ClientInfo>, String>,
+    /// Server-wide nfsd counters (`/proc/net/rpc/nfsd` plus pool stats).
+    pub nfsd: Result<NfsdStats, String>,
+}
+
+/// Server-wide nfsd rates over the last interval.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServerRates {
+    pub threads: Option<u32>,
+    /// RPC calls per second (one NFSv4 COMPOUND counts once).
+    pub calls_ps: f64,
+    pub bad_ps: f64,
+    /// What the nfsd threads were doing at this sample.
+    pub thread_states: Option<ThreadStates>,
+    /// Share of nfsd threads handling a request (on CPU or waiting on storage), 0–100.
+    pub busy_pct: Option<f64>,
+    pub arrived_ps: Option<f64>,
+    /// Share of arriving requests that had to wait for a thread. Only on kernels where
+    /// `sockets-enqueued` counts exactly that: newer ones (and RHEL 9 backports) count every
+    /// transport wake-up, so `sockets-enqueued` exceeds `packets-arrived` and this is None.
+    pub queued_pct: Option<f64>,
+    pub enqueued_ps: Option<f64>,
+    pub timedout_ps: Option<f64>,
+    /// nfsd payload bytes/s read from / written to the exported filesystems.
+    pub io_read_ps: f64,
+    pub io_write_ps: f64,
+    pub rc_hit_pct: Option<f64>,
+    /// Workload ops per second, busiest first (plumbing ops left out).
+    pub ops: Vec<(String, f64)>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -94,6 +123,64 @@ pub struct Model {
     pub last_wall: Option<String>,
     pub sock_error: Option<String>,
     pub nfsd_error: Option<String>,
+    prev_nfsd: Option<(Instant, NfsdStats)>,
+    /// Latest server-wide rates (None until two nfsd snapshots have been seen).
+    pub server: Option<ServerRates>,
+    /// Thread count from the latest snapshot, available before rates are.
+    pub server_threads: Option<u32>,
+    /// Why server stats are unavailable, if they are.
+    pub server_error: Option<String>,
+    /// History of `ServerRates::busy_pct`.
+    pub server_busy: VecDeque<f64>,
+}
+
+/// Rates between two nfsd snapshots, or None if a counter went backwards (nfsd restarted).
+fn server_rates(prev: &NfsdStats, cur: &NfsdStats, dt: f64) -> Option<ServerRates> {
+    let d = |a: u64, b: u64| b.checked_sub(a);
+    let calls = d(prev.rpc_calls, cur.rpc_calls)?;
+    let bad = d(prev.rpc_bad, cur.rpc_bad)?;
+    let io_r = d(prev.io_read, cur.io_read)?;
+    let io_w = d(prev.io_write, cur.io_write)?;
+    let hits = d(prev.rc_hits, cur.rc_hits)?;
+    let misses = d(prev.rc_misses, cur.rc_misses)?;
+    let (mut arrived_ps, mut enqueued_ps, mut timedout_ps, mut queued_pct) = (None, None, None, None);
+    if let (Some(p), Some(c)) = (&prev.pool, &cur.pool) {
+        let arrived = d(p.arrived, c.arrived)?;
+        let enqueued = d(p.enqueued, c.enqueued)?;
+        arrived_ps = Some(arrived as f64 / dt);
+        enqueued_ps = Some(enqueued as f64 / dt);
+        if let (Some(a), Some(b)) = (p.timedout, c.timedout) {
+            timedout_ps = Some(d(a, b)? as f64 / dt);
+        }
+        if enqueued <= arrived {
+            queued_pct = Some(if arrived == 0 { 0.0 } else { enqueued as f64 / arrived as f64 * 100.0 });
+        }
+    }
+    let prev_ops = prev.named_ops();
+    let mut ops: Vec<(String, f64)> = cur
+        .named_ops()
+        .into_iter()
+        .filter_map(|(name, n)| {
+            let delta = n.checked_sub(prev_ops.get(&name).copied().unwrap_or(0))?;
+            (delta > 0).then(|| (name, delta as f64 / dt))
+        })
+        .collect();
+    ops.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    Some(ServerRates {
+        threads: cur.threads,
+        calls_ps: calls as f64 / dt,
+        bad_ps: bad as f64 / dt,
+        thread_states: cur.thread_states,
+        busy_pct: cur.thread_states.and_then(|t| t.busy_pct()),
+        arrived_ps,
+        queued_pct,
+        enqueued_ps,
+        timedout_ps,
+        io_read_ps: io_r as f64 / dt,
+        io_write_ps: io_w as f64 / dt,
+        rc_hit_pct: (hits + misses > 0).then(|| hits as f64 / (hits + misses) as f64 * 100.0),
+        ops,
+    })
 }
 
 fn push_capped(h: &mut VecDeque<Point>, p: Point) {
@@ -145,11 +232,43 @@ impl Model {
         if let Ok(socks) = &s.socks {
             self.remember(socks, s.mono);
         }
+        if let Ok(n) = &s.nfsd {
+            self.prev_nfsd = Some((s.mono, n.clone()));
+        }
+    }
+
+    fn ingest_server(&mut self, s: &RawSample) {
+        let cur = match &s.nfsd {
+            Ok(n) => n,
+            Err(e) => {
+                self.server_error = Some(e.clone());
+                self.server = None;
+                self.prev_nfsd = None;
+                return;
+            }
+        };
+        self.server_error = None;
+        self.server_threads = cur.threads;
+        if let Some((at, prev)) = &self.prev_nfsd {
+            let dt = s.mono.saturating_duration_since(*at).as_secs_f64();
+            if dt > 0.0 {
+                // A counter going backwards (nfsd restart) just re-baselines.
+                self.server = server_rates(prev, cur, dt);
+                if let Some(b) = self.server.as_ref().and_then(|r| r.busy_pct) {
+                    if self.server_busy.len() == HISTORY {
+                        self.server_busy.pop_front();
+                    }
+                    self.server_busy.push_back(b);
+                }
+            }
+        }
+        self.prev_nfsd = Some((s.mono, cur.clone()));
     }
 
     pub fn ingest(&mut self, s: RawSample) {
         let start = *self.start.get_or_insert(s.mono);
         self.last_wall = Some(s.wall.clone());
+        self.ingest_server(&s);
         let mut infos = self.update_infos(&s);
         let socks = match &s.socks {
             Ok(v) => {
@@ -224,7 +343,7 @@ mod tests {
     }
 
     fn sample(at: Instant, socks: Vec<Sock>) -> RawSample {
-        RawSample { mono: at, wall: "00:00:00".into(), socks: Ok(socks), clients: Ok(vec![]) }
+        RawSample { mono: at, wall: "00:00:00".into(), socks: Ok(socks), clients: Ok(vec![]), nfsd: Err("none".into()) }
     }
 
     const MB: u64 = 1 << 20;
@@ -304,5 +423,85 @@ mod tests {
         m.ingest(RawSample { socks: Err("boom".into()), ..sample(t0 + Duration::from_secs(2), vec![]) });
         assert_eq!(m.sock_error.as_deref(), Some("boom"));
         assert_eq!(m.clients.len(), 1);
+    }
+
+    fn nfsd(calls: u64, arrived: u64, enqueued: u64, v4_read: u64, v4_getattr: u64) -> NfsdStats {
+        use crate::parse::rpc::PoolStats;
+        let mut proc4ops = vec![0; 76];
+        proc4ops[9] = v4_getattr;
+        proc4ops[25] = v4_read;
+        proc4ops[22] = calls; // PUTFH: plumbing, must not show up
+        NfsdStats {
+            threads: Some(16),
+            rpc_calls: calls,
+            io_read: calls * 1000,
+            rc_misses: calls,
+            proc4ops,
+            pool: Some(PoolStats { arrived, enqueued, woken: arrived, timedout: Some(0) }),
+            thread_states: Some(ThreadStates { running: 1, blocked: 3, idle: 12 }),
+            ..Default::default()
+        }
+    }
+
+    fn with_nfsd(at: Instant, n: NfsdStats) -> RawSample {
+        RawSample { nfsd: Ok(n), ..sample(at, vec![sock("10.0.0.1", 1, 0, 0)]) }
+    }
+
+    #[test]
+    fn server_rates_and_busy() {
+        let t0 = Instant::now();
+        let mut m = Model::default();
+        m.ingest(with_nfsd(t0, nfsd(1000, 1000, 0, 100, 100)));
+        assert_eq!(m.server, None);
+        assert_eq!(m.server_threads, Some(16));
+        m.ingest(with_nfsd(t0 + Duration::from_secs(2), nfsd(3000, 3000, 100, 300, 1100)));
+        let r = m.server.as_ref().expect("rates after two samples");
+        assert_eq!(r.calls_ps, 1000.0);
+        assert_eq!(r.io_read_ps, 1_000_000.0);
+        assert_eq!(r.busy_pct, Some(25.0));
+        assert_eq!(r.queued_pct, Some(5.0));
+        assert_eq!(r.enqueued_ps, Some(50.0));
+        assert_eq!(r.rc_hit_pct, Some(0.0));
+        assert_eq!(r.ops, vec![("GETATTR".to_string(), 500.0), ("READ".to_string(), 100.0)]);
+        assert_eq!(m.server_busy.len(), 1);
+    }
+
+    #[test]
+    fn queued_share_hidden_when_enqueued_exceeds_arrived() {
+        // Seen on RHEL 9.8 (5.14 with newer sunrpc): ~9 enqueues per arriving request.
+        let t0 = Instant::now();
+        let mut m = Model::default();
+        m.ingest(with_nfsd(t0, nfsd(0, 0, 0, 0, 0)));
+        m.ingest(with_nfsd(t0 + Duration::from_secs(5), nfsd(1000, 13_915, 129_650, 0, 0)));
+        let r = m.server.as_ref().unwrap();
+        assert_eq!(r.queued_pct, None);
+        assert_eq!(r.busy_pct, Some(25.0), "busy comes from thread states, not the pool ratio");
+    }
+
+    #[test]
+    fn server_counter_reset_skips_a_tick() {
+        let t0 = Instant::now();
+        let mut m = Model::default();
+        m.ingest(with_nfsd(t0, nfsd(1000, 1000, 0, 0, 0)));
+        m.ingest(with_nfsd(t0 + Duration::from_secs(1), nfsd(2000, 2000, 0, 0, 0)));
+        assert!(m.server.is_some());
+        // nfsd restarted: counters start over.
+        m.ingest(with_nfsd(t0 + Duration::from_secs(2), nfsd(10, 10, 0, 0, 0)));
+        assert_eq!(m.server, None);
+        m.ingest(with_nfsd(t0 + Duration::from_secs(3), nfsd(110, 110, 0, 0, 0)));
+        assert_eq!(m.server.as_ref().unwrap().calls_ps, 100.0);
+    }
+
+    #[test]
+    fn server_rebaseline_and_errors() {
+        let t0 = Instant::now();
+        let mut m = Model::default();
+        m.ingest(with_nfsd(t0, nfsd(0, 0, 0, 0, 0)));
+        m.rebaseline(&with_nfsd(t0 + Duration::from_secs(60), nfsd(60_000, 0, 0, 0, 0)));
+        m.ingest(with_nfsd(t0 + Duration::from_secs(62), nfsd(60_200, 0, 0, 0, 0)));
+        assert_eq!(m.server.as_ref().unwrap().calls_ps, 100.0);
+        m.ingest(sample(t0 + Duration::from_secs(64), vec![]));
+        assert_eq!(m.server, None);
+        assert_eq!(m.server_error.as_deref(), Some("none"));
     }
 }

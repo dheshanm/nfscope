@@ -27,6 +27,22 @@ pub fn duration(secs: f64) -> String {
     }
 }
 
+/// Compact count: `950`, `12.3k`, `1.2M`.
+pub fn count(n: f64) -> String {
+    let n = n.max(0.0);
+    match n {
+        n if n < 999.5 => format!("{}", n.round() as u64),
+        n if n < 999_950.0 => format!("{:.1}k", n / 1e3),
+        n => format!("{:.1}M", n / 1e6),
+    }
+}
+
+/// Percentage with one decimal below 10%: `0.4%`, `2.3%`, `45%`.
+pub fn percent(p: f64) -> String {
+    let p = p.clamp(0.0, 100.0);
+    if p < 9.95 { format!("{p:.1}%") } else { format!("{}%", p.round() as u64) }
+}
+
 const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// Tiny text sparkline of total throughput for the last `n` points.
@@ -52,6 +68,21 @@ mod tests {
         assert_eq!(rate(0.0), "0.0 B/s");
         assert_eq!(rate(111.1 * 1048576.0), "111.1 MiB/s");
         assert_eq!(bytes(458_900_000_000), "427.4 GiB");
+    }
+
+    #[test]
+    fn counts() {
+        assert_eq!(count(950.2), "950");
+        assert_eq!(count(999.7), "1.0k");
+        assert_eq!(count(12_345.0), "12.3k");
+        assert_eq!(count(1_234_567.0), "1.2M");
+    }
+
+    #[test]
+    fn percents() {
+        assert_eq!(percent(2.31), "2.3%");
+        assert_eq!(percent(45.4), "45%");
+        assert_eq!(percent(120.0), "100%");
     }
 
     #[test]

@@ -25,6 +25,27 @@ and WRITE below. Both graphs use one scale, so their heights compare directly. O
 one sample, and the newest sample is at the right edge. The bottom border shows how much time
 the graph covers and what full height means. Dots mark samples not collected yet, or idle periods.
 
+The third header line is **nfsd server health**: `nfsd 12/64 busy  4.1k op/s`.
+
+* **12/64 busy** means 12 of the 64 nfsd threads are handling a request right now: either on a
+  CPU or blocked (D state), usually waiting on the exported filesystem. It is sampled each tick
+  from `/proc/<pid>/stat` of the nfsd kernel threads. It turns yellow at 50% and red at 80%.
+  * Most threads busy most of the time means the server needs more threads (`rpc.nfsd N`, or
+    `threads=` in `/etc/nfs.conf`).
+  * Many threads blocked while CPUs are idle means the storage behind the exports is the
+    bottleneck, and adding threads won't help.
+* **op/s** is RPC calls per second. One NFSv4 COMPOUND counts as one call.
+* `pool_stats` is not used for "busy". On recent kernels, and RHEL 9 backports, its
+  `sockets-enqueued` counts every transport wake-up, so it can be many times `packets-arrived`.
+* Press `o`, or click the line, for the full breakdown:
+  * busy threads split into on-storage and on-CPU, with a history graph;
+  * request and timeout rates, and the share of requests that waited for a thread (only on
+    kernels where `pool_stats` reports that);
+  * RPC calls and the reply cache;
+  * nfsd payload bytes compared with TCP bytes;
+  * the busiest operations from `/proc/net/rpc/nfsd`, with NFSv3 and NFSv4 merged.
+    Per-request bookkeeping ops (PUTFH, SEQUENCE, …) are left out.
+
 * **READ** = server → client (the client is reading); **WRITE** = client → server.
 * Rates come from per-socket TCP counters (`ss -tni`: `bytes_acked` / `bytes_received`)
   on port 2049. They are diffed every tick and summed per client IP, so nconnect is handled.
@@ -48,6 +69,7 @@ the graph covers and what full height means. Dots mark samples not collected yet
 | `/` | fuzzy filter (hosts in the list, file paths in the drill-down) |
 | `p` | pause the display (sampling continues, so rates are right on resume) |
 | `+` / `-` | sampling interval (1–60 s) |
+| `o` | nfsd server health: busy threads, request rates, ops/s by operation |
 | `← →` `e` `c` | drill-down: collapse/expand, expand all, collapse all |
 | `d` | drill-down: hide files the client only holds a cached **delegation** for |
 | `r` | drill-down: reload open state |
@@ -67,6 +89,7 @@ the graph covers and what full height means. Dots mark samples not collected yet
 | Scroll wheel | Moves the selection in the list and scrolls the tree. |
 | Right-click, or click `◀ back` | Go back to the list. |
 | Click a key hint in the footer | Same as pressing that key. |
+| Click the `nfsd` line in the header | Open the server health panel. |
 
 Run with `--no-mouse` to keep your terminal's own text selection. Most terminals also allow
 Shift+drag to select text while mouse capture is on.

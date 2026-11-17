@@ -13,10 +13,13 @@ set -euo pipefail
 PORT=${PORT:-2049}
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/ss" "$T/clients"
+mkdir -p "$T/ss" "$T/clients" "$T/rpc" "$T/pool"
 
 for i in 1 2 3; do
   ss -tniH state established "( sport = :$PORT )" > "$T/ss/00$i.txt"
+  # Server-wide nfsd counters (no file or host names in these).
+  cat /proc/net/rpc/nfsd > "$T/rpc/00$i.txt" 2>/dev/null || true
+  cat /proc/fs/nfsd/pool_stats > "$T/pool/00$i.txt" 2>/dev/null || true
   [ $i -lt 3 ] && sleep 2
 done
 cp /proc/self/mountinfo "$T/mountinfo"

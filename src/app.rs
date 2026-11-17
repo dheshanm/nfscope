@@ -115,6 +115,8 @@ pub struct App {
     pub paused: bool,
     pub show_log: bool,
     pub show_help: bool,
+    /// nfsd server health overlay.
+    pub show_ops: bool,
     pub dns_enabled: bool,
     pub dns: HashMap<IpAddr, Dns>,
     pub throbber: ThrobberState,
@@ -141,6 +143,7 @@ impl App {
             paused: false,
             show_log: false,
             show_help: false,
+            show_ops: false,
             dns_enabled,
             dns: HashMap::new(),
             throbber: ThrobberState::default(),
@@ -267,8 +270,8 @@ impl App {
             self.quit = true;
             return;
         }
-        if self.show_help {
-            self.show_help = false;
+        if self.overlay_open() {
+            self.close_overlay();
             return;
         }
         if self.editing_filter() {
@@ -278,6 +281,7 @@ impl App {
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('o') => self.show_ops = true,
             KeyCode::Char('p') => self.paused = !self.paused,
             KeyCode::Char('l') => self.show_log = !self.show_log,
             KeyCode::Char('+') | KeyCode::Char('=') => self.step_interval(1),
@@ -287,6 +291,16 @@ impl App {
                 View::Detail(_) => self.handle_detail_key(k),
             },
         }
+    }
+
+    /// A modal (help or server health) is on top; the next key or click closes it.
+    pub fn overlay_open(&self) -> bool {
+        self.show_help || self.show_ops
+    }
+
+    fn close_overlay(&mut self) {
+        self.show_help = false;
+        self.show_ops = false;
     }
 
     fn editing_filter(&self) -> bool {
@@ -400,7 +414,7 @@ impl App {
                 self.last_click = if double { None } else { Some((now, pos)) };
                 self.click(pos, double);
             }
-            MouseEventKind::Down(MouseButton::Right) if !self.show_help => {
+            MouseEventKind::Down(MouseButton::Right) if !self.overlay_open() => {
                 if matches!(self.view, View::Detail(_)) {
                     self.view = View::Top;
                 }
@@ -412,8 +426,8 @@ impl App {
     }
 
     fn click(&mut self, pos: Position, double: bool) {
-        if self.show_help {
-            self.show_help = false;
+        if self.overlay_open() {
+            self.close_overlay();
             return;
         }
         if let Some(&(_, code)) = self.hit.buttons.iter().find(|(r, _)| r.contains(pos)) {
@@ -455,7 +469,7 @@ impl App {
     }
 
     fn wheel(&mut self, pos: Position, dir: isize) {
-        if self.show_help {
+        if self.overlay_open() {
             return;
         }
         match &mut self.view {

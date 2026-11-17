@@ -9,6 +9,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use crate::files::{self, OpenFiles};
 use crate::model::RawSample;
 use crate::parse::nfsd::parse_info;
+use crate::parse::rpc::{parse_pool_stats, parse_rpc_nfsd, parse_thread_states};
 use crate::parse::ss::parse_ss;
 use crate::source::{Source, SourceSpec};
 
@@ -25,13 +26,22 @@ pub fn collect(src: &mut dyn Source, port: u16) -> RawSample {
     let socks = src.sockets(port).map(|t| parse_ss(&t)).map_err(|e| format!("{e:#}"));
     let clients =
         src.client_infos().map(|v| v.iter().map(|(id, t)| parse_info(id, t)).collect()).map_err(|e| format!("{e:#}"));
+    let nfsd = src.nfsd_stats().map_err(|e| format!("{e:#}")).map(|t| {
+        let mut n = parse_rpc_nfsd(&t);
+        n.pool = src.pool_stats().ok().and_then(|p| parse_pool_stats(&p));
+        n.thread_states = src.nfsd_thread_states().ok().and_then(|t| parse_thread_states(&t));
+        n
+    });
+    if let Err(e) = &nfsd {
+        tracing::debug!("nfsd server stats unavailable: {e}");
+    }
     if let Err(e) = &socks {
         tracing::warn!("socket sample failed: {e}");
     }
     if let Err(e) = &clients {
         tracing::debug!("nfsd client info unavailable: {e}");
     }
-    RawSample { mono, wall: now_hms(), socks, clients }
+    RawSample { mono, wall: now_hms(), socks, clients, nfsd }
 }
 
 pub fn spawn_sampler(

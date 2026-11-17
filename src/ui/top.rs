@@ -45,11 +45,39 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
                 ("+", "slower", Some(Char('+'))),
                 ("-", "faster", Some(Char('-'))),
                 ("l", "log", Some(Char('l'))),
+                ("o", "nfsd", Some(Char('o'))),
                 ("?", "help", Some(Char('?'))),
             ],
             &mut app.hit,
         );
     }
+}
+
+/// `nfsd 12/64 busy  4.1k op/s`: server-wide health at a glance.
+fn server_line(app: &App) -> Line<'static> {
+    let m = &app.model;
+    if m.server_error.is_some() {
+        // Without root the nfsd banner already explains what is missing.
+        return if m.nfsd_error.is_some() { Line::default() } else { Line::from("nfsd stats n/a").fg(DIM) };
+    }
+    let mut spans = vec![Span::raw("nfsd ").bold()];
+    match (
+        m.server.as_ref().and_then(|r| r.thread_states),
+        m.server.as_ref().and_then(|r| r.threads).or(m.server_threads),
+    ) {
+        (Some(t), _) => {
+            let pct = t.busy_pct().unwrap_or(0.0);
+            spans.push(Span::raw(format!("{}/{} busy", t.busy(), t.total())).fg(super::busy_color(pct)));
+            spans.push(Span::raw("  "));
+        }
+        (None, Some(t)) => spans.push(Span::raw(format!("{t} thr  "))),
+        (None, None) => {}
+    }
+    match &m.server {
+        Some(r) => spans.push(Span::raw(format!("{} op/s", fmt::count(r.calls_ps)))),
+        None => spans.push(Span::raw("…").fg(DIM)),
+    }
+    Line::from(spans)
 }
 
 /// Header: summary on the left, server-wide READ / WRITE history on the right.
@@ -84,9 +112,14 @@ fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
             Span::raw(format!("({active} active)")).fg(DIM),
         ]),
         Line::from(l2),
-        Line::default(),
+        server_line(app),
         total,
     ];
+    // The nfsd health line opens the server overlay when clicked.
+    let health = Rect::new(text.x, text.y + 2, lines[2].width() as u16, 1).intersection(text);
+    if !health.is_empty() {
+        app.hit.buttons.push((health, KeyCode::Char('o')));
+    }
     f.render_widget(Paragraph::new(lines), text);
 
     // ---- right: READ above WRITE, each 2 rows tall, label + current rate + sparkline

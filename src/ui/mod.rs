@@ -28,6 +28,15 @@ pub fn legend() -> Vec<Span<'static>> {
 }
 pub const DIM: Color = Color::DarkGray;
 
+/// Colour for the share of busy nfsd threads: plain when low, yellow from 50 %, red from 80 %.
+pub fn busy_color(pct: f64) -> Color {
+    match pct {
+        p if p >= 80.0 => Color::Red,
+        p if p >= 50.0 => Color::Yellow,
+        _ => Color::Reset,
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     app.hit = HitMap::default();
     let area = f.area();
@@ -50,8 +59,142 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             log,
         );
     }
+    if app.show_ops {
+        ops_panel(f, area, app);
+    }
     if app.show_help {
         help(f, area);
+    }
+}
+
+/// Centered modal of `w` x `h` (clamped to `area`), cleared and bordered with `title`.
+/// Everything behind it is dimmed so the modal reads as the top layer.
+fn modal(f: &mut Frame, area: Rect, w: u16, h: u16, title: &str) -> Rect {
+    f.buffer_mut().set_style(
+        area,
+        Style::new()
+            .fg(DIM)
+            .bg(Color::Reset)
+            .add_modifier(Modifier::DIM)
+            .remove_modifier(Modifier::BOLD | Modifier::REVERSED),
+    );
+    let [r] = Layout::horizontal([Constraint::Length(w.min(area.width))]).flex(Flex::Center).areas(area);
+    let [r] = Layout::vertical([Constraint::Length(h.min(area.height))]).flex(Flex::Center).areas(r);
+    f.render_widget(Clear, r);
+    let block = Block::bordered().title(title.to_string());
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    inner
+}
+
+/// Server health overlay: nfsd thread pool, RPC and payload rates, and the busiest operations.
+fn ops_panel(f: &mut Frame, area: Rect, app: &App) {
+    use crate::fmt;
+    const LABEL: usize = 10;
+    let m = &app.model;
+    let label = |s: &str| Span::raw(format!("{s:<LABEL$}")).bold();
+    let num = |s: String| Span::raw(s);
+    let dim = |s: &str| Span::raw(s.to_string()).fg(DIM);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut ops: &[(String, f64)] = &[];
+    let busy_row;
+    match (&m.server, &m.server_error) {
+        (_, Some(e)) => {
+            lines.push(Line::from(format!("nfsd server stats unavailable: {e}")).yellow());
+            lines.push(Line::from("Run nfscope as root on the NFS server with nfsd running.").fg(DIM));
+            busy_row = None;
+        }
+        (None, None) => {
+            lines.push(Line::from("Collecting the first interval…").fg(DIM));
+            busy_row = None;
+        }
+        (Some(r), None) => {
+            let total = r.thread_states.map(|t| t.total()).or(r.threads);
+            let mut l = vec![label("Threads"), num(total.map_or("?".into(), |t| t.to_string()))];
+            if let (Some(t), Some(b)) = (r.thread_states, r.busy_pct) {
+                l.extend([
+                    dim(" · "),
+                    Span::raw(format!("{} busy", t.busy())).fg(busy_color(b)).bold(),
+                    dim(&format!(" ({} on storage, {} on CPU)", t.blocked, t.running)),
+                ]);
+            }
+            busy_row = r.busy_pct.map(|_| l.iter().map(|s| s.width()).sum::<usize>() as u16 + 2);
+            lines.push(Line::from(l));
+            if let Some(a) = r.arrived_ps {
+                let mut l = vec![label("Requests"), num(fmt::count(a)), dim("/s arrived")];
+                if let Some(q) = r.queued_pct {
+                    l.extend([dim(" · "), num(fmt::percent(q)), dim(" waited for a thread")]);
+                }
+                if let Some(t) = r.timedout_ps {
+                    l.extend([dim(" · "), num(format!("{t:.1}")), dim("/s idle timeouts")]);
+                }
+                lines.push(Line::from(l));
+            } else {
+                lines.push(Line::from(vec![label("Requests"), dim("pool_stats unavailable")]));
+            }
+            let mut l = vec![
+                label("RPC"),
+                num(fmt::count(r.calls_ps)),
+                dim(" calls/s · "),
+                num(fmt::count(r.bad_ps)),
+                dim(" bad/s"),
+            ];
+            if let Some(h) = r.rc_hit_pct {
+                l.extend([dim(" · reply cache "), num(fmt::percent(h)), dim(" hits")]);
+            }
+            lines.push(Line::from(l));
+            let (tr, tw) = m.total_rates();
+            lines.push(Line::from(vec![
+                label("Payload"),
+                Span::raw("READ ").fg(READ).bold(),
+                Span::raw(fmt::rate(r.io_read_ps)).fg(READ),
+                Span::raw("  WRITE ").fg(WRITE).bold(),
+                Span::raw(fmt::rate(r.io_write_ps)).fg(WRITE),
+                dim(&format!("   TCP {} / {}", fmt::rate(tr), fmt::rate(tw))),
+            ]));
+            lines.push(Line::default());
+            lines.push(Line::from("busy = threads handling a request now. All busy for long = add threads;").fg(DIM));
+            lines.push(Line::from("many on storage = the exported filesystem is the bottleneck.").fg(DIM));
+            lines.push(Line::default());
+            lines.push(Line::from(format!("{:<20}{:>8}{:>8}", "OPERATION", "OPS/S", "SHARE")).bold());
+            ops = &r.ops;
+        }
+    }
+
+    // Fixed size whatever the state or number of ops, so the panel never moves or resizes
+    // under the reader's eyes: 9 summary/heading lines, the op rows, and the border.
+    const MAX_OPS: usize = 12;
+    const HEIGHT: u16 = 9 + MAX_OPS as u16 + 2;
+    let inner = modal(f, area, 80, HEIGHT, " nfsd server (any key to close) ");
+    let room = (inner.height as usize).saturating_sub(lines.len());
+    let total: f64 = ops.iter().map(|o| o.1).sum();
+    let top = ops.first().map_or(0.0, |o| o.1);
+    let bar_w = inner.width.saturating_sub(38) as f64;
+    if ops.is_empty() && m.server.is_some() {
+        lines.push(Line::from("no operations this interval").fg(DIM));
+    }
+    for (name, rate) in ops.iter().take(room.min(MAX_OPS)) {
+        let share = if total > 0.0 { rate / total * 100.0 } else { 0.0 };
+        let bar = "█".repeat(if top > 0.0 { (rate / top * bar_w).round().max(1.0) as usize } else { 0 });
+        lines.push(Line::from(vec![
+            Span::raw(format!("{name:<20}{:>8}{:>8}  ", fmt::count(*rate), fmt::percent(share))),
+            Span::raw(bar).fg(Color::Cyan),
+        ]));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+
+    // Busy-thread history to the right of the thread line, scaled so small values show.
+    if let Some(x) = busy_row {
+        let spark = Rect::new(inner.x + x, inner.y, inner.width.saturating_sub(x), 1).intersection(inner);
+        let hist: Vec<f64> = m.server_busy.iter().rev().take(spark.width as usize).copied().collect();
+        let scale = hist.iter().copied().fold(10.0, f64::max);
+        // The graph stays visible (green) while the share is low.
+        let color = match busy_color(hist.first().copied().unwrap_or(0.0)) {
+            Color::Reset => Color::Green,
+            c => c,
+        };
+        sparkline(f.buffer_mut(), spark, &hist, scale, color);
     }
 }
 
@@ -130,6 +273,7 @@ fn help(f: &mut Frame, area: Rect) {
         ("← →  e / c", "detail: collapse/expand, expand/collapse all"),
         ("r", "detail: reload open files"),
         ("d", "detail: hide files held only as cached delegations"),
+        ("o", "nfsd server health: busy threads, ops/s"),
         ("l", "toggle log pane"),
         ("mouse", "click header: sort (again: reverse) · double-click row: open"),
         ("", "click tree node: fold · wheel: scroll · right-click: back"),
@@ -148,10 +292,7 @@ fn help(f: &mut Frame, area: Rect) {
     for (k, d) in rows {
         lines.push(Line::from(vec![Span::styled(format!("{k:>18}  "), Style::new().yellow().bold()), Span::raw(*d)]));
     }
-    let w = 86.min(area.width);
-    let h = (lines.len() as u16 + 2).min(area.height);
-    let [r] = Layout::horizontal([Constraint::Length(w)]).flex(Flex::Center).areas(area);
-    let [r] = Layout::vertical([Constraint::Length(h)]).flex(Flex::Center).areas(r);
-    f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(lines).block(Block::bordered().title(" help (any key to close) ")), r);
+    let h = lines.len() as u16 + 2;
+    let inner = modal(f, area, 86, h, " help (any key to close) ");
+    f.render_widget(Paragraph::new(lines), inner);
 }

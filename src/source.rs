@@ -20,6 +20,34 @@ pub trait Source: Send {
     fn mountinfo(&mut self) -> Result<String>;
     /// Reverse lookup for `ip`.
     fn resolve(&mut self, ip: IpAddr) -> Option<String>;
+    /// Text of `/proc/net/rpc/nfsd`.
+    fn nfsd_stats(&mut self) -> Result<String>;
+    /// Text of `/proc/fs/nfsd/pool_stats`.
+    fn pool_stats(&mut self) -> Result<String>;
+    /// Current scheduler state of the nfsd threads, as `<state letter> <count>` lines.
+    fn nfsd_thread_states(&mut self) -> Result<String>;
+}
+
+/// Continue a series of counter snapshots past its end: every number in `last` that is not
+/// below the matching number in `prev` becomes `last + k * (last - prev)`. Everything else
+/// (labels, counters that went down, lines that don't line up) is kept as in `last`.
+pub fn extrapolate_text(prev: &str, last: &str, k: u64) -> String {
+    let mut out = String::with_capacity(last.len());
+    let mut prev_lines = prev.lines();
+    for line in last.lines() {
+        let p: Vec<&str> = prev_lines.next().unwrap_or("").split_whitespace().collect();
+        let toks: Vec<String> = line
+            .split_whitespace()
+            .enumerate()
+            .map(|(i, t)| match (t.parse::<u64>(), p.get(i).and_then(|x| x.parse::<u64>().ok())) {
+                (Ok(l), Some(pv)) if l >= pv => (l + k * (l - pv)).to_string(),
+                _ => t.to_string(),
+            })
+            .collect();
+        out.push_str(&toks.join(" "));
+        out.push('\n');
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +115,45 @@ impl Source for LiveSource {
     fn resolve(&mut self, ip: IpAddr) -> Option<String> {
         dns_lookup::lookup_addr(&ip).ok()
     }
+
+    fn nfsd_stats(&mut self) -> Result<String> {
+        let p = "/proc/net/rpc/nfsd";
+        let mut t = fs::read_to_string(p).wrap_err_with(|| format!("reading {p}"))?;
+        // Some kernels leave the `th` line out; the thread count is also in the nfsd fs.
+        if !t.lines().any(|l| l.starts_with("th ")) {
+            let threads = self.nfsd_dir.parent().map(|d| d.join("threads"));
+            if let Some(n) = threads.and_then(|p| fs::read_to_string(p).ok()) {
+                t.push_str(&format!("th {}\n", n.trim()));
+            }
+        }
+        Ok(t)
+    }
+
+    fn pool_stats(&mut self) -> Result<String> {
+        let p = self.nfsd_dir.parent().ok_or_else(|| eyre!("no nfsd dir"))?.join("pool_stats");
+        fs::read_to_string(&p).wrap_err_with(|| format!("reading {}", p.display()))
+    }
+
+    fn nfsd_thread_states(&mut self) -> Result<String> {
+        // nfsd threads are kernel threads, one /proc/<pid> each: `pid (nfsd) S ...`.
+        let mut counts: std::collections::BTreeMap<char, u32> = Default::default();
+        for ent in fs::read_dir("/proc")?.flatten() {
+            if !ent.file_name().to_str().is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())) {
+                continue;
+            }
+            let Ok(stat) = fs::read_to_string(ent.path().join("stat")) else { continue };
+            let Some((head, rest)) = stat.rsplit_once(") ") else { continue };
+            if head.ends_with(" (nfsd")
+                && let Some(state) = rest.chars().next()
+            {
+                *counts.entry(state).or_default() += 1;
+            }
+        }
+        if counts.is_empty() {
+            return Err(eyre!("no nfsd threads running"));
+        }
+        Ok(counts.iter().map(|(s, n)| format!("{s} {n}\n")).collect())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -99,6 +166,9 @@ impl Source for LiveSource {
 /// DIR/clients/<id>/states   open state
 /// DIR/mountinfo             (optional) /proc/self/mountinfo
 /// DIR/hosts                 (optional) "ip name" lines used for reverse DNS
+/// DIR/rpc/*.txt             (optional) /proc/net/rpc/nfsd snapshots, replayed in name order
+/// DIR/pool/*.txt            (optional) /proc/fs/nfsd/pool_stats snapshots, likewise
+/// DIR/threads/*.txt         (optional) nfsd thread states (`R 1` / `D 8` / `I 55` lines), cycled
 /// ```
 ///
 /// After the captured snapshots run out, it extrapolates from the last two with a
@@ -109,18 +179,26 @@ type Synth = (Vec<Sock>, Vec<(u64, u64)>);
 pub struct FixtureSource {
     dir: PathBuf,
     tick: usize,
+    rpc_tick: u64,
+    pool_tick: u64,
+    threads_tick: usize,
     /// (current counters, per-socket base delta) once replay is exhausted.
     synth: Option<Synth>,
 }
 
 impl FixtureSource {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, tick: 0, synth: None }
+        Self { dir, tick: 0, rpc_tick: 0, pool_tick: 0, threads_tick: 0, synth: None }
     }
 
     fn snapshots(&self) -> Result<Vec<PathBuf>> {
-        let mut v: Vec<PathBuf> = fs::read_dir(self.dir.join("ss"))
-            .wrap_err("fixture dir has no ss/ subdirectory")?
+        self.series("ss")
+    }
+
+    /// `DIR/<sub>/*.txt` in name order.
+    fn series(&self, sub: &str) -> Result<Vec<PathBuf>> {
+        let mut v: Vec<PathBuf> = fs::read_dir(self.dir.join(sub))
+            .wrap_err_with(|| format!("fixture dir has no {sub}/ subdirectory"))?
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e == "txt"))
@@ -128,6 +206,20 @@ impl FixtureSource {
         v.sort();
         Ok(v)
     }
+}
+
+/// Snapshot `t` of a counter series, extrapolated linearly from the last two once it runs out.
+fn replay(files: &[PathBuf], t: u64) -> Result<String> {
+    let n = files.len() as u64;
+    if n == 0 {
+        return Err(eyre!("empty series"));
+    }
+    if t < n {
+        return Ok(fs::read_to_string(&files[t as usize])?);
+    }
+    let last = fs::read_to_string(&files[n as usize - 1])?;
+    let prev = if n > 1 { fs::read_to_string(&files[n as usize - 2])? } else { last.clone() };
+    Ok(extrapolate_text(&prev, &last, t - n + 1))
 }
 
 impl Source for FixtureSource {
@@ -185,5 +277,39 @@ impl Source for FixtureSource {
             let a: IpAddr = it.next()?.parse().ok()?;
             (a == ip).then(|| it.next().map(str::to_string)).flatten()
         })
+    }
+
+    fn nfsd_stats(&mut self) -> Result<String> {
+        let files = self.series("rpc")?;
+        self.rpc_tick += 1;
+        replay(&files, self.rpc_tick - 1)
+    }
+
+    fn pool_stats(&mut self) -> Result<String> {
+        let files = self.series("pool")?;
+        self.pool_tick += 1;
+        replay(&files, self.pool_tick - 1)
+    }
+
+    fn nfsd_thread_states(&mut self) -> Result<String> {
+        // A snapshot, not a counter: cycle through the captures instead of extrapolating.
+        let files = self.series("threads")?;
+        if files.is_empty() {
+            return Err(eyre!("empty series"));
+        }
+        self.threads_tick += 1;
+        Ok(fs::read_to_string(&files[(self.threads_tick - 1) % files.len()])?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extrapolates_counters_only() {
+        let prev = "# pool packets-arrived\n0 100 5\nrpc 10 3\n";
+        let last = "# pool packets-arrived\n0 150 4\nrpc 30 3\n";
+        assert_eq!(extrapolate_text(prev, last, 2), "# pool packets-arrived\n0 250 4\nrpc 70 3\n");
     }
 }

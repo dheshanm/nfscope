@@ -390,3 +390,89 @@ fn read_write_colours_are_consistent() {
     assert_eq!(fg(&b, (ax + 1, ay)), WRITE);
     assert_eq!(fg(&b, find(&b, "3 writable")), WRITE);
 }
+
+// ------------------------------------------------------------------ nfsd server health
+
+#[test]
+fn server_overlay() {
+    let (mut app, _) = fixture_app();
+    let b = render(&mut app, 150, 20);
+    assert!(format!("{b}").contains("nfsd 12/64 busy  4.1k op/s"), "{b}");
+    key(&mut app, KeyCode::Char('o'));
+    assert!(app.show_ops);
+    insta::assert_snapshot!(render(&mut app, 100, 30));
+    key(&mut app, KeyCode::Esc);
+    assert!(!app.show_ops);
+}
+
+#[test]
+fn server_health_line_click_opens_overlay() {
+    let (mut app, _) = fixture_app();
+    let t = Instant::now();
+    let b = render(&mut app, 150, 20);
+    click_at(&mut app, find(&b, "12/64 busy"), t);
+    assert!(app.show_ops);
+    // Wheel and right-click are swallowed while the overlay is up; a click closes it.
+    mouse(&mut app, MouseEventKind::ScrollDown, (5, 10));
+    assert!(app.show_ops);
+    click_at(&mut app, (1, 1), t + Duration::from_secs(1));
+    assert!(!app.show_ops);
+}
+
+#[test]
+fn server_stats_keep_moving_after_replay() {
+    let (mut app, mut src) = fixture_app();
+    let t0 = Instant::now();
+    for i in 2..8u64 {
+        let mut s = collect(&mut src, 2049);
+        s.mono = t0 + Duration::from_secs(2 * i);
+        app.on_sample(s);
+        let r = app.model.server.as_ref().expect("server rates");
+        assert!((4000.0..4200.0).contains(&r.calls_ps), "tick {i}: {}", r.calls_ps);
+        assert_eq!(r.threads, Some(64));
+    }
+}
+
+#[test]
+fn server_stats_missing_from_fixture() {
+    // A fixture without rpc/ and pool/ (an older capture) shows "n/a" instead of failing.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("no-rpc-fixture");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("ss")).unwrap();
+    std::fs::create_dir_all(dir.join("clients")).unwrap();
+    std::fs::copy(fixture_dir().join("ss/001.txt"), dir.join("ss/001.txt")).unwrap();
+    let mut src = FixtureSource::new(dir);
+    let mut app = App::new("t".into(), Duration::from_secs(2), false);
+    app.on_sample(collect(&mut src, 2049));
+    assert!(app.model.server_error.is_some());
+    let b = render(&mut app, 150, 20);
+    assert!(format!("{b}").contains("nfsd stats n/a"), "{b}");
+    key(&mut app, KeyCode::Char('o'));
+    let b = render(&mut app, 100, 30);
+    assert!(format!("{b}").contains("nfsd server stats unavailable"), "{b}");
+}
+
+#[test]
+fn server_overlay_keeps_its_place_and_dims_background() {
+    let (mut app, _) = fixture_app();
+    let corner = |b: &TestBackend| find(b, "┌ nfsd server");
+    let b = render(&mut app, 120, 40);
+    let header = find(&b, "Clients 10");
+    assert_eq!(b.buffer()[header].fg, ratatui::style::Color::Reset, "not dimmed while closed");
+
+    key(&mut app, KeyCode::Char('o'));
+    let b = render(&mut app, 120, 40);
+    let at = corner(&b);
+    assert_eq!(b.buffer()[header].fg, nfscope::ui::DIM, "background dimmed");
+    assert!(b.buffer()[header].modifier.contains(ratatui::style::Modifier::DIM));
+    let (x, y) = find(&b, "OPERATION");
+    assert_ne!(b.buffer()[(x, y)].fg, nfscope::ui::DIM, "panel itself not dimmed");
+
+    // Fewer operations (or none yet) must not move or resize the panel.
+    app.model.server.as_mut().unwrap().ops.truncate(2);
+    let b = render(&mut app, 120, 40);
+    assert_eq!(corner(&b), at);
+    app.model.server = None;
+    let b = render(&mut app, 120, 40);
+    assert_eq!(corner(&b), at);
+}
