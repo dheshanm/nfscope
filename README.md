@@ -92,6 +92,7 @@ The third header line is **nfsd server health**: `nfsd 14/128 busy ↑41  4.1k o
 | `← →` `e` `c` | drill-down: collapse/expand, expand all, collapse all |
 | `d` | drill-down: hide files the client only holds a cached **delegation** for |
 | `r` | drill-down: reload open state |
+| `f` | drill-down: find the full path of the selected file, or of every file in the selected group or export (`Esc` stops) |
 | `l` | log pane |
 | `?` | help |
 | `q` / `Ctrl-C` | quit |
@@ -122,6 +123,21 @@ Shift+drag to select text while mouse capture is on.
   * Press `d` to see only what is really open.
 * The kernel reports only the **last two path components** (`dir/file`). The export
   comes from mapping the state's `superblock` device to `/proc/self/mountinfo`.
+  * So a group is a directory **name**, not a directory: `…/IMAGES/` holds open files
+    from every directory called `IMAGES` on that export. `./` is the export's top level.
+  * `(name unknown to the kernel)` holds files the kernel prints as `/`. nfsd reached them
+    by file handle, typically a reopen of a delegated or long-open file whose dentry had
+    been evicted. It then holds a disconnected dentry with no name or parent, and with
+    `no_subtree_check` it never reconnects regular files. They're listed as `inode N`, and
+    `f` finds them by inode alone (shown as `= path/to/file`).
+  * Files are told apart by inode, so two `IMAGES/0001.dcm` from different directories
+    are listed separately (their tree ids get a `#inode` suffix).
+  * Press `f` to find the full path. nfscope walks the export's directories, without
+    crossing into other mounts, looking for `<dir named IMAGES>/0001.dcm` with the right
+    inode. It stops once everything asked for is found. On a large archive this can take
+    a while, so select a single file when you can. The search gives up after 10 minutes,
+    and `Esc` stops it. Found paths appear next to each file (`in projects/x/IMAGES/`) and
+    the `/` filter matches them.
 * NFSv3 clients have no per-client state in `/proc`, so their drill-down shows rates and
   connections only.
 

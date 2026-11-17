@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use nfscope::app::{Action, App, SortKey, View};
 use nfscope::files;
 use nfscope::source::{FixtureSource, Source};
-use nfscope::workers::collect;
+use nfscope::workers::{FindMsg, collect};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -28,7 +28,11 @@ fn run_actions(app: &mut App, src: &mut FixtureSource) {
                 let r = files::load(src, ip);
                 app.on_states(ip, r);
             }
-            Action::SetInterval(_) => {}
+            Action::SetInterval(_) | Action::CancelFind => {}
+            Action::FindPaths(req) => {
+                let res = src.find_paths(&req.export, &req.targets, &mut |_| true).map_err(|e| e.to_string());
+                app.on_find(FindMsg::Done { id: req.id, res, secs: 0.5 });
+            }
         }
     }
 }
@@ -204,12 +208,68 @@ fn detail_hide_delegations() {
     app.open_detail("10.20.1.11".parse().unwrap());
     run_actions(&mut app, &mut src);
     let before = format!("{}", render(&mut app, 130, 40));
-    assert!(before.contains("Open files: 33 in 5 dirs"));
+    assert!(before.contains("Open files: 33 under 5 dir names"));
     key(&mut app, KeyCode::Char('d'));
     let after = format!("{}", render(&mut app, 130, 40));
     // The three cached_*.nii.gz files are held only as delegations.
     assert!(after.contains("delegation-only hidden (30 shown)"), "{after}");
     assert!(!after.contains("sub_020"));
+}
+
+#[test]
+fn find_full_paths_on_demand() {
+    let (mut app, mut src) = fixture_app();
+    app.open_detail("10.20.1.11".parse().unwrap());
+    run_actions(&mut app, &mut src);
+    let select = |app: &mut App, id: &[&str]| {
+        let View::Detail(d) = &mut app.view else { panic!() };
+        d.tree_state.open(id[..id.len().min(2)].iter().map(|s| s.to_string()).collect());
+        d.tree_state.select(id.iter().map(|s| s.to_string()).collect());
+    };
+    // One file: its real directory shows up next to it.
+    select(&mut app, &["/export/data", "sub_001", "scan_0000.dcm"]);
+    key(&mut app, KeyCode::Char('f'));
+    let Some(Action::FindPaths(req)) = app.actions.first().cloned() else { panic!("{:?}", app.actions) };
+    assert_eq!((req.export.as_str(), req.targets.len(), req.targets[0].ino), ("/export/data", 1, 0x1001));
+    run_actions(&mut app, &mut src);
+    let out = format!("{}", render(&mut app, 130, 40));
+    assert!(out.contains("scan_0000.dcm  in study/sub_001/"), "{out}");
+    assert!(out.contains("found 1/1 full path"), "{out}");
+    // The whole group: only the one not yet known is searched for; the rest are gone.
+    select(&mut app, &["/export/data", "sub_001"]);
+    key(&mut app, KeyCode::Char('f'));
+    let Some(Action::FindPaths(req)) = app.actions.first().cloned() else { panic!() };
+    assert_eq!(req.targets.len(), 13);
+    run_actions(&mut app, &mut src);
+    let out = format!("{}", render(&mut app, 130, 40));
+    assert!(out.contains("scan_0001.dcm  in study/sub_001/"), "{out}");
+    assert!(out.contains("scan_0002.dcm  not found"), "{out}");
+    assert!(out.contains("found 1/13 full paths"), "{out}");
+    // The filter matches resolved paths.
+    key(&mut app, KeyCode::Char('/'));
+    for c in "study".chars() {
+        key(&mut app, KeyCode::Char(c));
+    }
+    let out = format!("{}", render(&mut app, 130, 40));
+    assert!(out.contains("(2 match)"), "{out}");
+}
+
+#[test]
+fn esc_stops_a_running_search_before_leaving() {
+    let (mut app, mut src) = fixture_app();
+    app.open_detail("10.20.1.11".parse().unwrap());
+    run_actions(&mut app, &mut src);
+    {
+        let View::Detail(d) = &mut app.view else { panic!() };
+        d.tree_state.select(vec!["/export/data".into()]);
+    }
+    key(&mut app, KeyCode::Char('f'));
+    app.actions.clear(); // leave the search running
+    let out = format!("{}", render(&mut app, 130, 40));
+    assert!(out.contains("locating 31 files under /export/data"), "{out}");
+    key(&mut app, KeyCode::Esc);
+    assert_eq!(app.actions, [Action::CancelFind]);
+    assert!(matches!(app.view, View::Detail(_)), "first Esc only stops the search");
 }
 
 // ------------------------------------------------------------------ mouse

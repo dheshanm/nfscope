@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
@@ -12,7 +14,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 use nfscope::app::{Action, App};
 use nfscope::source::SourceSpec;
-use nfscope::workers::{SamplerCmd, spawn_dns_worker, spawn_sampler, spawn_states_worker};
+use nfscope::workers::{SamplerCmd, spawn_dns_worker, spawn_find_worker, spawn_sampler, spawn_states_worker};
 
 /// Live top-like view of NFS client I/O, run on the NFS server itself.
 ///
@@ -47,6 +49,11 @@ struct Args {
     /// Don't capture the mouse (keeps the terminal's native text selection).
     #[arg(long)]
     no_mouse: bool,
+
+    /// Debug the full-path search without the TUI: `--find MOUNT PARENT/NAME INODE` walks MOUNT
+    /// the way the `f` key does, prints what it finds and exits. PARENT/NAME `/` = name unknown.
+    #[arg(long, num_args = 3, value_names = ["MOUNT", "PARENT/NAME", "INODE"], hide = true)]
+    find: Option<Vec<String>>,
 }
 
 fn init_logging(path: &std::path::Path) -> Option<tracing_appender::non_blocking::WorkerGuard> {
@@ -70,6 +77,9 @@ fn init_logging(path: &std::path::Path) -> Option<tracing_appender::non_blocking
 fn main() -> Result<()> {
     color_eyre::install()?;
     let args = Args::parse();
+    if let Some(f) = &args.find {
+        return find_cli(&f[0], &f[1], &f[2]);
+    }
     let _guard = init_logging(&args.log);
 
     let spec = match &args.fixture {
@@ -87,6 +97,10 @@ fn main() -> Result<()> {
     let (dns_tx, dns_rx) = unbounded();
     spawn_sampler(spec.clone(), args.port, interval, sample_tx, cmd_rx);
     spawn_states_worker(spec.clone(), states_req_rx, states_tx);
+    let (find_req_tx, find_req_rx) = unbounded();
+    let (find_tx, find_rx) = unbounded();
+    let find_current = Arc::new(AtomicU64::new(0));
+    spawn_find_worker(spec.clone(), find_req_rx, find_tx, find_current.clone());
     if !args.no_dns {
         spawn_dns_worker(spec.clone(), dns_req_rx, dns_tx);
     }
@@ -130,6 +144,7 @@ fn main() -> Result<()> {
                 },
                 recv(sample_rx) -> s => app.on_sample(s?),
                 recv(states_rx) -> r => { let (ip, res) = r?; app.on_states(ip, res) },
+                recv(find_rx) -> m => app.on_find(m?),
                 recv(dns_rx) -> r => { if let Ok((ip, name)) = r { app.on_dns(ip, name) } },
                 recv(anim) -> _ => app.tick(),
             }
@@ -144,6 +159,12 @@ fn main() -> Result<()> {
                     Action::SetInterval(d) => {
                         let _ = cmd_tx.send(SamplerCmd::SetInterval(d));
                     }
+                    Action::FindPaths(req) => {
+                        // Newer id = the running search (if any) stops at its next progress check.
+                        find_current.store(req.id, Ordering::Relaxed);
+                        let _ = find_req_tx.send(req);
+                    }
+                    Action::CancelFind => find_current.store(0, Ordering::Relaxed),
                 }
             }
             if app.quit {
@@ -156,4 +177,29 @@ fn main() -> Result<()> {
     }
     ratatui::restore();
     res
+}
+
+fn find_cli(mount: &str, kernel_path: &str, ino: &str) -> Result<()> {
+    let (dir, name) = match kernel_path.rsplit_once('/') {
+        Some(("", "")) => (nfscope::files::ANON_DIR, ""),
+        Some(dn) => dn,
+        None => ("", kernel_path),
+    };
+    let target = nfscope::files::Target { dir: dir.into(), name: name.into(), ino: ino.parse()? };
+    let t = std::time::Instant::now();
+    let mut progress = |dirs| {
+        eprint!("\r{dirs} dirs searched");
+        true
+    };
+    let r = nfscope::files::find_paths(
+        std::path::Path::new(mount),
+        &[target],
+        nfscope::source::FIND_BUDGET,
+        &mut progress,
+    )?;
+    eprintln!("\r{} dirs searched in {:.1}s: {:?}", r.dirs, t.elapsed().as_secs_f64(), r.end);
+    for p in r.found.values() {
+        println!("{}", p.display());
+    }
+    Ok(())
 }

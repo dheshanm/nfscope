@@ -322,6 +322,8 @@ fn help(f: &mut Frame, area: Rect) {
         ("+ / -", "sampling interval"),
         ("← →  e / c", "detail: collapse/expand, expand/collapse all"),
         ("r", "detail: reload open files"),
+        ("f", "detail: find full path of file / every file in group (Esc stops)"),
+        ("…/IMAGES/", "kernel gives only parent/name: groups every dir with that name"),
         ("d", "detail: hide files held only as cached delegations"),
         ("o", "nfsd server health: busy threads, ops/s"),
         ("l", "toggle log pane"),

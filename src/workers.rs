@@ -1,12 +1,14 @@
-//! Background threads: periodic sampler, on-demand open-state loader, reverse DNS.
+//! Background threads: periodic sampler, on-demand open-state loader, full-path finder, reverse DNS.
 
 use std::net::IpAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
-use crate::files::{self, OpenFiles};
+use crate::files::{self, FindResult, OpenFiles, Target};
 use crate::model::RawSample;
 use crate::parse::nfsd::parse_info;
 use crate::parse::rpc::{ThreadAcc, parse_pool_stats, parse_rpc_nfsd, parse_thread_states};
@@ -123,6 +125,61 @@ pub fn spawn_states_worker(spec: SourceSpec, reqs: Receiver<IpAddr>, tx: Sender<
             }
         })
         .expect("spawn states thread");
+}
+
+/// A request to find the full paths of some open files on one export.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindReq {
+    /// Increases with every request; the worker drops a search once a newer id is current.
+    pub id: u64,
+    pub ip: IpAddr,
+    /// Mount point to search.
+    pub export: String,
+    pub targets: Vec<Target>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FindMsg {
+    Progress { id: u64, dirs: u64 },
+    Done { id: u64, res: Result<FindResult, String>, secs: f64 },
+}
+
+/// Runs one search at a time. `current` holds the id of the search that is still wanted (0 =
+/// none): bumping it cancels the running search.
+pub fn spawn_find_worker(spec: SourceSpec, reqs: Receiver<FindReq>, tx: Sender<FindMsg>, current: Arc<AtomicU64>) {
+    thread::Builder::new()
+        .name("find".into())
+        .spawn(move || {
+            let mut src = spec.build();
+            for req in reqs {
+                if current.load(Ordering::Relaxed) != req.id {
+                    continue;
+                }
+                let t = Instant::now();
+                let mut progress = |dirs| {
+                    let _ = tx.send(FindMsg::Progress { id: req.id, dirs });
+                    current.load(Ordering::Relaxed) == req.id
+                };
+                let res = src.find_paths(&req.export, &req.targets, &mut progress).map_err(|e| format!("{e:#}"));
+                let secs = t.elapsed().as_secs_f64();
+                match &res {
+                    Ok(r) => tracing::info!(
+                        "{}: found {}/{} paths under {} ({} dirs, {secs:.1}s, {:?})",
+                        req.ip,
+                        r.found.len(),
+                        req.targets.len(),
+                        req.export,
+                        r.dirs,
+                        r.end
+                    ),
+                    Err(e) => tracing::warn!("{}: path search failed: {e}", req.ip),
+                }
+                if tx.send(FindMsg::Done { id: req.id, res, secs }).is_err() {
+                    return;
+                }
+            }
+        })
+        .expect("spawn find thread");
 }
 
 /// Reverse DNS on a small pool so one slow lookup does not hold up the rest.

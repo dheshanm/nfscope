@@ -14,8 +14,8 @@ use tui_tree_widget::{Tree, TreeItem};
 use crossterm::event::KeyCode;
 
 use super::{DIM, READ, WRITE, footer as draw_footer, status_lines};
-use crate::app::{App, Detail, View};
-use crate::files::{OpenFile, OpenFiles};
+use crate::app::{App, Detail, PathState, View};
+use crate::files::{ANON_DIR, OpenFile, OpenFiles, dir_label};
 use crate::fmt;
 use crate::model::ClientStat;
 
@@ -89,6 +89,7 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
                 ("c", "collapse all", Some(Char('c'))),
                 ("d", if d.hide_deleg { "show delegs" } else { "hide delegs" }, Some(Char('d'))),
                 ("/", "filter", Some(Char('/'))),
+                ("f", "full path", Some(Char('f'))),
                 ("r", "reload", Some(Char('r'))),
                 ("p", "pause", Some(Char('p'))),
                 ("?", "help", Some(Char('?'))),
@@ -266,29 +267,52 @@ fn draw_conns(f: &mut Frame, area: Rect, stat: Option<&ClientStat>) {
     f.render_widget(table, table_area);
 }
 
-fn file_line(of: &OpenFile) -> Line<'static> {
+fn file_line(of: &OpenFile, path: Option<&PathState>) -> Line<'static> {
     let kinds: Vec<&str> = of.kinds.iter().map(String::as_str).collect();
     let name =
         if deleg_only(of) { Span::raw(of.name.clone()).fg(Color::Gray) } else { Span::raw(of.name.clone()).bold() };
-    Line::from(vec![
+    let mut spans = vec![
         if of.read { Span::raw("r").fg(READ).bold() } else { Span::raw("-").fg(DIM) },
         if of.write { Span::raw("w").fg(WRITE).bold() } else { Span::raw("-").fg(DIM) },
         Span::raw(format!(" {:<12} ", kinds.join(","))).fg(DIM),
         name,
-    ])
+    ];
+    match path {
+        // The kernel had no name for it: show what it is called.
+        Some(PathState::Found(p)) if of.dir == ANON_DIR => {
+            let rel = std::path::Path::new(p).strip_prefix(&of.export).map_or(p.clone(), |r| r.display().to_string());
+            spans.push(Span::raw(format!("  = {rel}")).cyan())
+        }
+        Some(PathState::Found(p)) => spans.push(Span::raw(format!("  in {}", rel_dir(&of.export, p))).cyan()),
+        Some(PathState::Pending) => spans.push(Span::raw("  locating…").yellow()),
+        Some(PathState::Missing) => spans.push(Span::raw("  not found (closed, renamed or deleted?)").red()),
+        None => {}
+    }
+    Line::from(spans)
+}
+
+/// Directory of `path` relative to the export it is under (`./` for the export root).
+fn rel_dir(export: &str, path: &str) -> String {
+    let p = std::path::Path::new(path);
+    let dir = p.parent().unwrap_or(p);
+    match dir.strip_prefix(export) {
+        Ok(r) if r.as_os_str().is_empty() => "./".into(),
+        Ok(r) => format!("{}/", r.display()),
+        Err(_) => format!("{}/", dir.display()),
+    }
 }
 
 /// A file the client merely holds a cached delegation for (not currently opened).
 pub fn deleg_only(f: &OpenFile) -> bool {
-    f.kinds.len() == 1 && f.kinds.contains("deleg")
+    f.deleg_only()
 }
 
 pub fn build_tree(
     of: &OpenFiles,
-    filter: &str,
-    hide_deleg: bool,
+    d: &Detail,
     matcher: &mut nucleo_matcher::Matcher,
 ) -> (Vec<TreeItem<'static, String>>, usize) {
+    let (filter, hide_deleg) = (d.filter.as_str(), d.hide_deleg);
     let pattern = (!filter.is_empty()).then(|| Pattern::parse(filter, CaseMatching::Ignore, Normalization::Smart));
     let mut buf = Vec::new();
     // export -> dir -> files
@@ -299,7 +323,10 @@ pub fn build_tree(
             continue;
         }
         if let Some(p) = &pattern {
-            let hay = format!("{}/{}", file.export, file.path());
+            let hay = match d.path_of(file) {
+                Some(PathState::Found(p)) => p.clone(),
+                _ => format!("{}/{}", file.export, file.path()),
+            };
             if p.score(Utf32Str::new(&hay, &mut buf), matcher).is_none() {
                 continue;
             }
@@ -318,14 +345,15 @@ pub fn build_tree(
                 .map(|(dir, files)| {
                     let writers = files.iter().filter(|f| f.write).count();
                     let mut label = vec![
-                        Span::raw(format!("{dir}/")).bold(),
+                        Span::raw(dir_label(dir)).bold(),
                         Span::raw(format!("  {} file{}", files.len(), if files.len() == 1 { "" } else { "s" })).fg(DIM),
                     ];
                     if writers > 0 {
                         label.push(Span::raw(format!(" · {writers} writable")).fg(WRITE));
                     }
-                    let leaves = files.iter().map(|f| TreeItem::new_leaf(f.name.clone(), file_line(f))).collect();
-                    TreeItem::new(dir.to_string(), Line::from(label), leaves).expect("unique file names per dir")
+                    let leaves =
+                        files.iter().map(|f| TreeItem::new_leaf(f.leaf.clone(), file_line(f, d.path_of(f)))).collect();
+                    TreeItem::new(dir.to_string(), Line::from(label), leaves).expect("unique leaf ids per dir")
                 })
                 .collect();
             let label =
@@ -369,9 +397,9 @@ fn draw_files(
             );
         }
         Some(Ok(of)) => {
-            let (items, shown) = build_tree(of, &d.filter, d.hide_deleg, matcher);
+            let (items, shown) = build_tree(of, d, matcher);
             let mut title = vec![Span::raw(format!(
-                " Open files: {} in {} dirs · {} writable · states:",
+                " Open files: {} under {} dir names · {} writable · states:",
                 of.files.len(),
                 of.dir_count(),
                 of.writers()
@@ -389,6 +417,18 @@ fn draw_files(
             let mut block = Block::bordered().title(Line::from(title));
             if let Some(e) = of.errors.first() {
                 block = block.title_bottom(Line::from(format!(" ⚠ {e} ")).red());
+            }
+            if let Some(job) = &d.find {
+                let t = Throbber::default().label(format!(
+                    "locating {} file{} under {}: {} dirs searched (Esc stops) ",
+                    job.files,
+                    if job.files == 1 { "" } else { "s" },
+                    job.export,
+                    job.dirs
+                ));
+                block = block.title_bottom(t.to_line(throbber).yellow().right_aligned());
+            } else if let Some(n) = &d.find_note {
+                block = block.title_bottom(Line::from(format!(" {n} ")).fg(DIM).right_aligned());
             }
             if items.is_empty() {
                 let msg = if of.files.is_empty() {

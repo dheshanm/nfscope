@@ -183,11 +183,12 @@ pub fn parse_states(text: &str) -> Vec<StateEntry> {
                 "access" => e.access = Some(v),
                 "deny" => e.deny = Some(v),
                 "superblock" => {
-                    // "maj:min:ino" in hex
+                    // "maj:min:ino": the kernel prints `%02x:%02x:%ld`, so the device is hex but
+                    // the inode is decimal (what `stat` / `ls -i` show).
                     let mut it = v.split(':');
                     let maj = it.next().and_then(|x| u32::from_str_radix(x, 16).ok());
                     let min = it.next().and_then(|x| u32::from_str_radix(x, 16).ok());
-                    e.ino = it.next().and_then(|x| u64::from_str_radix(x, 16).ok());
+                    e.ino = it.next().and_then(|x| x.parse::<u64>().ok());
                     if let (Some(a), Some(b)) = (maj, min) {
                         e.dev = Some((a, b));
                     }
@@ -272,7 +273,7 @@ callback address: 10.156.77.211:0
         assert_eq!(s[0].kind, "open");
         assert_eq!(s[0].access.as_deref(), Some("rw"));
         assert_eq!(s[0].dev, Some((253, 16)));
-        assert_eq!(s[0].ino, Some(0x3541));
+        assert_eq!(s[0].ino, Some(3541));
         assert_eq!(s[0].filename.as_deref(), Some("study_a/scan, \"001\".dcm"));
         assert_eq!(s[1].kind, "deleg");
         assert_eq!(s[2].kind, "lock");
@@ -300,5 +301,14 @@ callback address: 10.156.77.211:0
         assert_eq!(unescape(r"a\040b"), "a b");
         assert_eq!(unescape(r#"a\"b\\c"#), "a\"b\\c");
         assert_eq!(unescape(r"trail\"), "trail\\");
+    }
+
+    #[test]
+    fn superblock_device_is_hex_inode_is_decimal() {
+        // Captured on a live server; `ls -i` on the file gives 595568 and mountinfo has 0:52.
+        let s = parse_states(
+            r#"- 0x1: { type: deleg, access: r, superblock: "00:34:595568", filename: "inf_invivo/epoch_4.pklv4" }"#,
+        );
+        assert_eq!((s[0].dev, s[0].ino), (Some((0, 52)), Some(595568)));
     }
 }

@@ -7,7 +7,11 @@ use std::process::Command;
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 
+use crate::files::{FindEnd, FindResult, Target, find_paths};
 use crate::parse::ss::{Sock, parse_ss, render_ss};
+
+/// How long a full-path search may walk an export before giving up.
+pub const FIND_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
 
 pub trait Source: Send {
     /// Raw `ss -tniH` text for established sockets with local port `port`.
@@ -26,6 +30,13 @@ pub trait Source: Send {
     fn pool_stats(&mut self) -> Result<String>;
     /// Current scheduler state of the nfsd threads, as `<state letter> <count>` lines.
     fn nfsd_thread_states(&mut self) -> Result<String>;
+    /// Full paths of `targets` on the filesystem mounted at `root` (see [`find_paths`]).
+    fn find_paths(
+        &mut self,
+        root: &str,
+        targets: &[Target],
+        progress: &mut dyn FnMut(u64) -> bool,
+    ) -> Result<FindResult>;
 }
 
 /// Continue a series of counter snapshots past its end: every number in `last` that is not
@@ -199,6 +210,15 @@ impl Source for LiveSource {
         self.rescan_nfsd()?;
         self.cached_thread_states().ok_or_else(|| eyre!("no nfsd threads running"))
     }
+
+    fn find_paths(
+        &mut self,
+        root: &str,
+        targets: &[Target],
+        progress: &mut dyn FnMut(u64) -> bool,
+    ) -> Result<FindResult> {
+        find_paths(Path::new(root), targets, FIND_BUDGET, progress).wrap_err_with(|| format!("searching {root}"))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -214,6 +234,7 @@ impl Source for LiveSource {
 /// DIR/rpc/*.txt             (optional) /proc/net/rpc/nfsd snapshots, replayed in name order
 /// DIR/pool/*.txt            (optional) /proc/fs/nfsd/pool_stats snapshots, likewise
 /// DIR/threads/*.txt         (optional) nfsd thread states (`R 1` / `D 8` / `I 55` lines), cycled
+/// DIR/paths                 (optional) "<inode, decimal> <full path>" lines answering find_paths
 /// ```
 ///
 /// After the captured snapshots run out, it extrapolates from the last two with a
@@ -344,6 +365,28 @@ impl Source for FixtureSource {
         }
         self.threads_tick += 1;
         Ok(fs::read_to_string(&files[(self.threads_tick - 1) % files.len()])?)
+    }
+
+    fn find_paths(
+        &mut self,
+        root: &str,
+        targets: &[Target],
+        _progress: &mut dyn FnMut(u64) -> bool,
+    ) -> Result<FindResult> {
+        let text = fs::read_to_string(self.dir.join("paths")).unwrap_or_default();
+        let mut found = std::collections::HashMap::new();
+        for l in text.lines() {
+            let Some((ino, path)) = l.split_once(' ') else { continue };
+            let Ok(ino) = ino.parse::<u64>() else { continue };
+            let p = PathBuf::from(path);
+            if p.starts_with(root)
+                && targets.iter().any(|t| t.ino == ino && p.file_name().is_some_and(|n| *n == *t.name))
+            {
+                found.insert(ino, p);
+            }
+        }
+        let end = if found.len() == targets.len() { FindEnd::AllFound } else { FindEnd::Exhausted };
+        Ok(FindResult { found, dirs: text.lines().count() as u64, end })
     }
 }
 

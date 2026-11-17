@@ -1,1 +1,1 @@
-- 0x000000010000000d5f1c8e9e: { type: open, access: w, deny: --, superblock: "fd:10:4000", filename: "backup/home.tar", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }
+- 0x000000010000000d5f1c8e9e: { type: open, access: w, deny: --, superblock: "fd:10:16384", filename: "backup/home.tar", owner: "open id:\x00\x00\x00>\x00\x00\x00\x00" }

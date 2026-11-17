@@ -12,8 +12,9 @@ use ratatui::widgets::TableState;
 use throbber_widgets_tui::ThrobberState;
 use tui_tree_widget::TreeState;
 
-use crate::files::OpenFiles;
+use crate::files::{FileKey, FindEnd, OpenFile, OpenFiles, Target};
 use crate::model::{ClientStat, Model, RawSample};
+use crate::workers::{FindMsg, FindReq};
 
 pub const INTERVALS: [u64; 8] = [1, 2, 3, 5, 10, 15, 30, 60];
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -81,6 +82,28 @@ pub enum Action {
     Resolve(IpAddr),
     LoadStates(IpAddr),
     SetInterval(Duration),
+    /// Start a full-path search (replacing any running one).
+    FindPaths(FindReq),
+    /// Stop the running full-path search.
+    CancelFind,
+}
+
+/// What we know about an open file's full path.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathState {
+    Pending,
+    Found(String),
+    /// The whole export was searched without finding it (closed, renamed or deleted since).
+    Missing,
+}
+
+/// A running full-path search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindJob {
+    pub id: u64,
+    pub export: String,
+    pub files: usize,
+    pub dirs: u64,
 }
 
 pub struct Detail {
@@ -94,6 +117,17 @@ pub struct Detail {
     pub hide_deleg: bool,
     /// Last-known stats, so the view survives the client disconnecting.
     pub last: Option<ClientStat>,
+    /// Full paths looked up with `f`, by (export, inode). Kept across reloads.
+    pub paths: HashMap<FileKey, PathState>,
+    pub find: Option<FindJob>,
+    /// Outcome of the last search, shown under the tree.
+    pub find_note: Option<String>,
+}
+
+impl Detail {
+    pub fn path_of(&self, f: &OpenFile) -> Option<&PathState> {
+        self.paths.get(&f.key()?)
+    }
 }
 
 pub enum View {
@@ -125,6 +159,7 @@ pub struct App {
     pub matcher: Matcher,
     pub hit: HitMap,
     last_click: Option<(Instant, Position)>,
+    next_find_id: u64,
 }
 
 impl App {
@@ -152,6 +187,7 @@ impl App {
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             hit: HitMap::default(),
             last_click: None,
+            next_find_id: 0,
         }
     }
 
@@ -191,6 +227,97 @@ impl App {
             }
             d.files = Some(res);
         }
+    }
+
+    pub fn on_find(&mut self, msg: FindMsg) {
+        let View::Detail(d) = &mut self.view else { return };
+        let Some(job) = &mut d.find else { return };
+        match msg {
+            FindMsg::Progress { id, dirs } if id == job.id => job.dirs = dirs,
+            FindMsg::Done { id, res, secs } if id == job.id => {
+                let job = d.find.take().expect("checked above");
+                let note = match res {
+                    Ok(r) => {
+                        let complete = matches!(r.end, FindEnd::AllFound | FindEnd::Exhausted);
+                        for ((export, ino), st) in d.paths.iter_mut() {
+                            if *st == PathState::Pending && *export == job.export {
+                                if let Some(p) = r.found.get(ino) {
+                                    *st = PathState::Found(p.display().to_string());
+                                } else if complete {
+                                    *st = PathState::Missing;
+                                }
+                            }
+                        }
+                        let why = match r.end {
+                            FindEnd::AllFound => "",
+                            FindEnd::Exhausted => " · the rest are gone (closed, renamed or deleted)",
+                            FindEnd::TimedOut => " · gave up: time limit",
+                            FindEnd::Cancelled => " · stopped",
+                        };
+                        format!(
+                            "found {}/{} full path{} · searched {} dirs in {secs:.1}s{why}",
+                            r.found.len(),
+                            job.files,
+                            if job.files == 1 { "" } else { "s" },
+                            r.dirs
+                        )
+                    }
+                    Err(e) => format!("path search failed: {e}"),
+                };
+                d.paths.retain(|_, s| *s != PathState::Pending);
+                d.find_note = Some(note);
+            }
+            _ => {}
+        }
+    }
+
+    /// `f` in the drill-down: look up the full paths of the selected file, or of every file
+    /// under the selected directory group / export.
+    fn find_selected(&mut self) {
+        let View::Detail(d) = &mut self.view else { return };
+        let Some(Ok(of)) = &d.files else { return };
+        let sel = d.tree_state.selected().to_vec();
+        let Some(export) = sel.first().cloned() else { return };
+        if !export.starts_with('/') {
+            d.find_note = Some(format!("can't search {export}: no mount point for that device"));
+            return;
+        }
+        let targets: Vec<Target> = of
+            .files
+            .iter()
+            .filter(|f| f.export == export)
+            .filter(|f| sel.get(1).is_none_or(|x| *x == f.dir))
+            .filter(|f| sel.get(2).is_none_or(|x| *x == f.leaf))
+            .filter(|f| !(d.hide_deleg && f.deleg_only()))
+            .filter(|f| !matches!(d.path_of(f), Some(PathState::Found(_))))
+            .filter_map(Target::of)
+            .collect();
+        if targets.is_empty() {
+            d.find_note = Some("full path already known (or the kernel gave no inode)".into());
+            return;
+        }
+        // One search at a time: a new one replaces the old.
+        if d.find.take().is_some() {
+            d.paths.retain(|_, s| *s != PathState::Pending);
+        }
+        self.next_find_id += 1;
+        let id = self.next_find_id;
+        for t in &targets {
+            d.paths.insert((export.clone(), t.ino), PathState::Pending);
+        }
+        d.find = Some(FindJob { id, export: export.clone(), files: targets.len(), dirs: 0 });
+        d.find_note = None;
+        self.actions.push(Action::FindPaths(FindReq { id, ip: d.ip, export, targets }));
+    }
+
+    /// Back to the client list, stopping any path search the drill-down started.
+    fn leave_detail(&mut self) {
+        if let View::Detail(d) = &self.view
+            && d.find.is_some()
+        {
+            self.actions.push(Action::CancelFind);
+        }
+        self.view = View::Top;
     }
 
     pub fn tick(&mut self) {
@@ -416,7 +543,7 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Right) if !self.overlay_open() => {
                 if matches!(self.view, View::Detail(_)) {
-                    self.view = View::Top;
+                    self.leave_detail();
                 }
             }
             MouseEventKind::ScrollUp => self.wheel(pos, -1),
@@ -455,7 +582,7 @@ impl App {
             }
             View::Detail(d) => {
                 if self.hit.back.contains(pos) {
-                    self.view = View::Top;
+                    self.leave_detail();
                 } else if let Some(id) = d.tree_state.rendered_at(pos).map(<[String]>::to_vec) {
                     // export / dir nodes fold on a single click; files just get selected.
                     let is_node = id.len() < 3;
@@ -495,6 +622,9 @@ impl App {
             filter_editing: false,
             hide_deleg: false,
             last: self.model.clients.get(&ip).cloned(),
+            paths: HashMap::new(),
+            find: None,
+            find_note: None,
         }));
         self.actions.push(Action::LoadStates(ip));
     }
@@ -503,11 +633,15 @@ impl App {
         let View::Detail(d) = &mut self.view else { return };
         let ts = &mut d.tree_state;
         match k.code {
+            KeyCode::Esc if d.find.is_some() => {
+                // The worker reports back as `Cancelled`; on_find tidies up.
+                self.actions.push(Action::CancelFind);
+            }
             KeyCode::Esc | KeyCode::Backspace => {
                 if !d.filter.is_empty() && k.code == KeyCode::Esc {
                     d.filter.clear();
                 } else {
-                    self.view = View::Top;
+                    self.leave_detail();
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -550,6 +684,7 @@ impl App {
                 d.hide_deleg = !d.hide_deleg;
                 ts.select_first();
             }
+            KeyCode::Char('f') => self.find_selected(),
             KeyCode::Char('r') => {
                 d.files = None;
                 let ip = d.ip;
