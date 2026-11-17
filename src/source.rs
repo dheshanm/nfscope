@@ -1,22 +1,21 @@
-//! Where raw data comes from: the live system (`ss` + `/proc`) or a fixture directory.
+//! Where raw data comes from: the live system (sock_diag netlink + `/proc`) or a fixture directory.
 
 use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use color_eyre::eyre::{Result, WrapErr, eyre};
 
 use crate::files::{FindEnd, FindResult, Target, find_paths};
 use crate::parse::inflight::{InflightRpc, parse_snapshot};
-use crate::parse::ss::{Sock, parse_ss, render_ss};
+use crate::parse::ss::{Sock, parse_ss};
 
 /// How long a full-path search may walk an export before giving up.
 pub const FIND_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
 
 pub trait Source: Send {
-    /// Raw `ss -tniH` text for established sockets with local port `port`.
-    fn sockets(&mut self, port: u16) -> Result<String>;
+    /// Established TCP connections to local port `port`.
+    fn sockets(&mut self, port: u16) -> Result<Vec<Sock>>;
     /// `(client dir id, info file text)` for every NFSv4 client.
     fn client_infos(&mut self) -> Result<Vec<(String, String)>>;
     /// Text of `clients/<id>/states`.
@@ -107,6 +106,9 @@ pub struct LiveSource {
     /// When /proc was last scanned for nfsd threads.
     last_rescan: Option<std::time::Instant>,
     rpc_status: RpcStatus,
+    /// The sock_diag netlink socket, opened on first use (and again after an error).
+    #[cfg(target_os = "linux")]
+    sock_diag: Option<crate::sockdiag::SockDiag>,
 }
 
 /// While nfsd has no threads (stopped), how often /proc is scanned for them again.
@@ -120,6 +122,8 @@ impl LiveSource {
             nfsd_threads_at_scan: None,
             last_rescan: None,
             rpc_status: RpcStatus::default(),
+            #[cfg(target_os = "linux")]
+            sock_diag: None,
         }
     }
 
@@ -243,17 +247,21 @@ fn nfsd_state(stat: &str) -> Option<char> {
 }
 
 impl Source for LiveSource {
-    fn sockets(&mut self, port: u16) -> Result<String> {
-        let out = Command::new("ss")
-            .args(["-tniH", "state", "established", &format!("( sport = :{port} )")])
-            // Newer ss sizes its columns to $COLUMNS when not on a terminal; keep its layout fixed.
-            .env_remove("COLUMNS")
-            .output()
-            .wrap_err("running `ss` (is iproute2 installed?)")?;
-        if !out.status.success() {
-            return Err(eyre!("ss failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    #[cfg(target_os = "linux")]
+    fn sockets(&mut self, port: u16) -> Result<Vec<Sock>> {
+        let diag = match &mut self.sock_diag {
+            Some(d) => d,
+            None => self.sock_diag.insert(crate::sockdiag::SockDiag::open().wrap_err("opening sock_diag netlink")?),
+        };
+        diag.established(port).map_err(|e| {
+            self.sock_diag = None;
+            eyre!("sock_diag dump: {e}")
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn sockets(&mut self, _port: u16) -> Result<Vec<Sock>> {
+        Err(eyre!("live sampling needs Linux (sock_diag netlink); use --fixture DIR"))
     }
 
     fn client_infos(&mut self) -> Result<Vec<(String, String)>> {
@@ -388,15 +396,15 @@ fn replay(files: &[PathBuf], t: u64) -> Result<String> {
 }
 
 impl Source for FixtureSource {
-    fn sockets(&mut self, _port: u16) -> Result<String> {
+    fn sockets(&mut self, _port: u16) -> Result<Vec<Sock>> {
         let snaps = self.snapshots()?;
         if snaps.is_empty() {
-            return Ok(String::new());
+            return Ok(Vec::new());
         }
         let t = self.tick;
         self.tick += 1;
         if t < snaps.len() {
-            return Ok(fs::read_to_string(&snaps[t])?);
+            return Ok(parse_ss(&fs::read_to_string(&snaps[t])?));
         }
         if self.synth.is_none() {
             let last = parse_ss(&fs::read_to_string(&snaps[snaps.len() - 1])?);
@@ -420,7 +428,7 @@ impl Source for FixtureSource {
             s.bytes_acked += (*dr as f64 * f_r) as u64;
             s.bytes_received += (*dw as f64 * f_w) as u64;
         }
-        Ok(render_ss(cur, "10.0.0.1:2049"))
+        Ok(cur.clone())
     }
 
     fn client_infos(&mut self) -> Result<Vec<(String, String)>> {

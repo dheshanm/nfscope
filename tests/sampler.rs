@@ -29,7 +29,7 @@ impl Blocking {
 }
 
 impl Source for Blocking {
-    fn sockets(&mut self, port: u16) -> Result<String> {
+    fn sockets(&mut self, port: u16) -> Result<Vec<nfscope::parse::ss::Sock>> {
         self.inner.sockets(port)
     }
     fn client_infos(&mut self) -> Result<Vec<(String, String)>> {

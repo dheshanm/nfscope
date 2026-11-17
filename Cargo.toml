@@ -23,6 +23,9 @@ tui-tree-widget = "0.24.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+netlink-packet-core = "0.9"
+netlink-packet-sock-diag = { version = "0.5", features = ["rich_nlas"] }
+netlink-sys = "0.9"
 
 [dev-dependencies]
 insta = "1.49.0"

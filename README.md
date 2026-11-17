@@ -76,8 +76,9 @@ kernels everything else works and the views below explain why this one is missin
   covered too, unlike the open-files tree.
 
 * **READ** = server → client (the client is reading); **WRITE** = client → server.
-* Rates come from per-socket TCP counters (`ss -tni`: `bytes_acked` / `bytes_received`)
-  on port 2049. They are diffed every tick and summed per client IP, so nconnect is handled.
+* Rates come from per-socket TCP counters (`tcp_info`'s `bytes_acked` / `bytes_received`)
+  on port 2049, read straight from the kernel over sock_diag netlink, the interface `ss -tni`
+  uses (no `ss` process per tick, no iproute2 needed). They are diffed every tick and summed per client IP, so nconnect is handled.
   A connection is identified by client address and port *and* the server address it reached,
   so a server with several addresses (VIPs, bonds, NFSv4.1 trunking) is counted right even
   when a client uses the same port towards two of them. A connection the socket dump skips
@@ -92,7 +93,7 @@ kernels everything else works and the views below explain why this one is missin
   sample arrives at all for twice the interval, a red banner says the sampler is stuck and
   how old the numbers on screen are.
 * The **FLAGS** column marks TCP trouble on a client's connections. It reads the same
-  `ss -tni` output, so it costs nothing extra. A flag shows only after its condition holds for
+  `tcp_info` as the rates, so it costs nothing extra. A flag shows only after its condition holds for
   2 ticks in a row:
 
   | Flag | Condition | Meaning |
@@ -197,8 +198,8 @@ ssh -t root@SERVER nfscope
 nfscope [-i SECS (1-60)] [--port 2049] [--no-dns] [--no-mouse] [--log /var/log/nfscope.log] [--fixture DIR]
 ```
 
-Root is needed to read `/proc/fs/nfsd/clients/*`. Without it, rates still work from
-`ss` and a banner explains what's missing. Logs go to `--log` (filter with `RUST_LOG`,
+Root is needed to read `/proc/fs/nfsd/clients/*`. Without it, rates still work (sock_diag
+needs no privileges) and a banner explains what's missing. Logs go to `--log` (filter with `RUST_LOG`,
 e.g. `RUST_LOG=debug`), and are also visible in the `l` pane. A new log file is created
 readable by root only (it names clients), and nfscope won't write through a symlink. If the
 file can't be opened (not root, say), the `l` pane says so.
@@ -228,9 +229,11 @@ The capture script replaces every file and directory name in `states` with a pse
 If the server has an nfscope new enough for `--dump-inflight` (point `NFSCOPE=` at it,
 e.g. `ssh root@SERVER 'NFSCOPE=/tmp/nfscope bash -s' < …`), it also saves a few in-flight
 snapshots: client addresses, XIDs and op numbers, no file names. `nfscope --dump-inflight`
-on its own prints the current list, which is handy for checking a kernel.
+on its own prints the current list, which is handy for checking a kernel. Likewise
+`nfscope --dump-sockets` prints the NFS connections as nfscope reads them, in `ss -tniH`
+format, to compare with `ss` or to save as `ss/001.txt` in a fixture.
 
 Layout: `src/parse/` (ss / nfsd / mountinfo / in-flight parsers), `src/netlink.rs` (generic
-netlink client), `src/inflight.rs` (in-flight averages), `src/model.rs` (rates, history),
+netlink client), `src/sockdiag.rs` (TCP stats over sock_diag), `src/inflight.rs` (in-flight averages), `src/model.rs` (rates, history),
 `src/files.rs` (open-state aggregation), `src/source.rs` (live vs fixture), `src/workers.rs`
 (sampler / states / DNS threads), `src/app.rs` (state + keys), `src/ui/` (ratatui views).

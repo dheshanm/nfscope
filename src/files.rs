@@ -409,4 +409,57 @@ mod tests {
         assert_eq!((r.end, r.found.len()), (FindEnd::Exhausted, 0));
         std::fs::remove_dir_all(&root).unwrap();
     }
+
+    /// Breadth-first: a shallow target is found without walking the deep trees beside it; a
+    /// target 20 levels down is still found; an exhaustive search lists each directory once.
+    #[test]
+    fn find_goes_shallow_first() {
+        let root = std::env::temp_dir().join(format!("nfscope-passes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // 4 deep archives, each a chain 20 levels deep with 3 side directories per level.
+        let mut total = 0;
+        for a in 0..4 {
+            let mut d = root.join(format!("archive{a}"));
+            total += 1;
+            for lvl in 0..20 {
+                for side in 0..3 {
+                    std::fs::create_dir_all(d.join(format!("side{side}"))).unwrap();
+                    total += 1;
+                }
+                d = d.join(format!("l{lvl}"));
+                std::fs::create_dir_all(&d).unwrap();
+                total += 1;
+            }
+            if a == 3 {
+                std::fs::write(d.join("deep.dat"), "").unwrap();
+            }
+        }
+        std::fs::create_dir_all(root.join("proj/code")).unwrap();
+        total += 2;
+        std::fs::write(root.join("proj/code/run.py"), "").unwrap();
+        let ino = |p: PathBuf| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
+        let deep_path = (0..20).fold(root.join("archive3"), |d, l| d.join(format!("l{l}"))).join("deep.dat");
+
+        let shallow = [Target { dir: "code".into(), name: "run.py".into(), ino: ino(root.join("proj/code/run.py")) }];
+        let r = find_paths(&root, &shallow, Duration::from_secs(30), &mut |_| true).unwrap();
+        assert_eq!(r.end, FindEnd::AllFound);
+        assert_eq!(r.found[&shallow[0].ino], root.join("proj/code/run.py"));
+        assert!(r.dirs <= 6, "root and the top level only, listed {}", r.dirs);
+
+        let deep = [Target { dir: "l19".into(), name: "deep.dat".into(), ino: ino(deep_path.clone()) }];
+        let r = find_paths(&root, &deep, Duration::from_secs(30), &mut |_| true).unwrap();
+        assert_eq!((r.end, &r.found[&deep[0].ino]), (FindEnd::AllFound, &deep_path));
+
+        let anon = [Target { dir: ANON_DIR.into(), name: "inode".into(), ino: ino(deep_path.clone()) }];
+        let r = find_paths(&root, &anon, Duration::from_secs(30), &mut |_| true).unwrap();
+        assert_eq!(r.found[&anon[0].ino], deep_path);
+
+        let gone = [Target { dir: "code".into(), name: "gone.py".into(), ino: u64::MAX }];
+        let r = find_paths(&root, &gone, Duration::from_secs(30), &mut |_| true).unwrap();
+        assert_eq!((r.end, r.dirs), (FindEnd::Exhausted, total + 1), "every directory (and the root) listed once");
+
+        let r = find_paths(&root, &gone, Duration::from_secs(30), &mut |_| false).unwrap();
+        assert!(matches!(r.end, FindEnd::Cancelled | FindEnd::Exhausted), "{:?}", r.end);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

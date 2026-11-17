@@ -60,6 +60,12 @@ struct Args {
     /// fixture format: save a few runs as `DIR/inflight/001.txt`, … to replay them.
     #[arg(long, hide = true)]
     dump_inflight: bool,
+
+    /// Print the NFS connections and their TCP stats as nfscope reads them (sock_diag netlink)
+    /// and exit. The output is the fixture format, which is `ss -tniH` text, so it can be
+    /// compared with `ss` directly or saved as `DIR/ss/001.txt`, … to replay.
+    #[arg(long, hide = true)]
+    dump_sockets: bool,
 }
 
 fn init_logging(path: &std::path::Path) -> Option<tracing_appender::non_blocking::WorkerGuard> {
@@ -104,6 +110,11 @@ fn main() -> Result<()> {
         Some(dir) => SourceSpec::Fixture(dir.clone()),
         None => SourceSpec::Live { nfsd_dir: args.nfsd_dir.clone() },
     };
+    if args.dump_sockets {
+        let socks = spec.build().sockets(args.port)?;
+        print!("{}", nfscope::parse::ss::render_ss(&socks, &format!("0.0.0.0:{}", args.port)));
+        return Ok(());
+    }
     if args.dump_inflight {
         for rpc in spec.build().rpc_status()? {
             println!("{rpc}");

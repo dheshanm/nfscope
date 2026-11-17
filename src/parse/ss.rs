@@ -1,4 +1,9 @@
-//! Parser for `ss -tniH state established '( sport = :2049 )'` output.
+//! Per-connection TCP stats ([`Sock`]) and their text form: the output of
+//! `ss -tniH state established '( sport = :2049 )'`.
+//!
+//! Live sampling reads the kernel directly (`crate::sockdiag`, Linux only); this text form is
+//! the fixture format (`scripts/capture-fixture.sh` saves `ss` output, `--dump-sockets` prints
+//! nfscope's own reading the same way).
 //!
 //! Each socket is a header line (`Recv-Q Send-Q Local:Port Peer:Port`) followed by
 //! one or more indented lines of `key:value` TCP info.
@@ -120,7 +125,7 @@ pub fn parse_ss(text: &str) -> Vec<Sock> {
     out
 }
 
-/// Render sockets back into `ss`-like text (used by the fixture source to synthesise samples).
+/// Render sockets as `ss`-like text (`--dump-sockets`).
 /// Each socket's own server address is used when known, else `local` (`addr:port`).
 pub fn render_ss(socks: &[Sock], local: &str) -> String {
     use std::fmt::Write;

@@ -135,10 +135,9 @@ fn detail_filter_files() {
 #[test]
 fn fixture_source_keeps_moving_after_replay() {
     let mut src = FixtureSource::new(fixture_dir());
-    let parse = |t: String| nfscope::parse::ss::parse_ss(&t);
-    let mut prev = parse(src.sockets(2049).unwrap());
+    let mut prev = src.sockets(2049).unwrap();
     for _ in 0..5 {
-        let cur = parse(src.sockets(2049).unwrap());
+        let cur = src.sockets(2049).unwrap();
         assert_eq!(cur.len(), prev.len());
         for (a, b) in prev.iter().zip(&cur) {
             assert!(b.bytes_acked >= a.bytes_acked && b.bytes_received >= a.bytes_received);
@@ -158,7 +157,7 @@ fn local_capture_parses() {
         return;
     }
     let mut src = FixtureSource::new(dir.clone());
-    let socks = nfscope::parse::ss::parse_ss(&src.sockets(2049).unwrap());
+    let socks = src.sockets(2049).unwrap();
     assert!(!socks.is_empty());
     let raw_headers = std::fs::read_to_string(dir.join("ss/001.txt"))
         .unwrap()

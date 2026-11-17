@@ -7,6 +7,8 @@ pub mod inflight;
 pub mod model;
 pub mod netlink;
 pub mod parse;
+#[cfg(target_os = "linux")]
+pub mod sockdiag;
 pub mod source;
 pub mod ui;
 pub mod workers;

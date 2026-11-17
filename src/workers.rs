@@ -13,7 +13,6 @@ use crate::inflight::InflightAcc;
 use crate::model::RawSample;
 use crate::parse::nfsd::parse_info;
 use crate::parse::rpc::{ThreadAcc, parse_pool_stats, parse_rpc_nfsd, parse_thread_states};
-use crate::parse::ss::parse_ss;
 use crate::source::{Source, SourceSpec};
 
 pub enum SamplerCmd {
@@ -64,7 +63,7 @@ type Socks = Result<Vec<crate::parse::ss::Sock>, String>;
 type Clients = Result<Vec<crate::parse::nfsd::ClientInfo>, String>;
 
 fn sockets_and_clients(src: &mut dyn Source, port: u16) -> (Socks, Clients) {
-    let socks = src.sockets(port).map(|t| parse_ss(&t)).map_err(|e| format!("{e:#}"));
+    let socks = src.sockets(port).map_err(|e| format!("{e:#}"));
     let clients =
         src.client_infos().map(|v| v.iter().map(|(id, t)| parse_info(id, t)).collect()).map_err(|e| format!("{e:#}"));
     (socks, clients)
