@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "nfscope"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "color-eyre",

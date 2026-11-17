@@ -727,3 +727,33 @@ fn detail_ops_panel_breaks_threads_down_by_operation() {
     assert_eq!(b.buffer()[(right, y)].symbol(), "█");
     insta::assert_snapshot!(b);
 }
+
+#[test]
+fn detail_ops_panel_scale_is_at_least_one_thread() {
+    use nfscope::workers::IntervalAcc;
+    let (mut app, mut src) = fixture_app();
+    // A light client: nine empty snapshots per interval, plus the fixture's own, which catches
+    // one of its requests. About 0.1 threads: a sliver, not a full-height bar. Enough intervals
+    // to scroll fixture_app's single-snapshot samples (1.0 threads) out of the graph.
+    for i in 0..90u64 {
+        let mut acc = IntervalAcc::default();
+        for _ in 0..9 {
+            acc.inflight.add(&[]);
+        }
+        let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
+        s.mono += Duration::from_secs(4 + 2 * i);
+        app.on_sample(s);
+    }
+    let ip: IpAddr = "10.20.4.50".parse().unwrap();
+    let l = app.model.clients[&ip].inflight.clone().unwrap();
+    assert!((l.avg - 0.1).abs() < 1e-9, "{l:?}");
+
+    app.open_detail(ip);
+    run_actions(&mut app, &mut src);
+    let b = render(&mut app, 130, 40);
+    let text = format!("{b}");
+    assert!(text.contains("full height = 1.0 threads"), "{text}");
+    let (_, top) = find(&b, "nfsd threads by operation");
+    let right = b.buffer().area.width - 2;
+    assert_eq!(b.buffer()[(right, top + 1)].symbol(), "▁", "{text}");
+}

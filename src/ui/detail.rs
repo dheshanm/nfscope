@@ -243,6 +243,9 @@ fn ops_height(c: &ClientStat) -> u16 {
 /// many requests were running *and* how long each took: it shows where this client's share of
 /// the server goes, not how many operations it sent. Fast ops (GETATTR, ACCESS, …) on a quiet
 /// client may never be caught at all.
+/// Smallest full height of the ops sparklines, in nfsd threads.
+const MIN_OPS_SCALE: f64 = 1.0;
+
 fn draw_ops(f: &mut Frame, area: Rect, c: &ClientStat) {
     const LABEL_W: u16 = 44;
     let mut block = Block::bordered().title(Line::from(vec![
@@ -262,7 +265,9 @@ fn draw_ops(f: &mut Frame, area: Rect, c: &ClientStat) {
     }
     let ops = &ops[..ops.len().min(OP_ROWS)];
     let visible = |name: &str| -> Vec<f64> { c.op_history[name].iter().rev().take(spark_w).copied().collect() };
-    let scale = ops.iter().flat_map(|(name, _)| visible(name)).fold(0.0, f64::max);
+    // At least one thread tall, so a stray 0.1-thread sample on a quiet client stays a sliver
+    // instead of a full bar; real load still fills the rows.
+    let scale = ops.iter().flat_map(|(name, _)| visible(name)).fold(MIN_OPS_SCALE, f64::max);
     let now = c.inflight.as_ref();
     let total = now.map_or(0.0, |l| l.avg);
     let rows = Layout::vertical(vec![Constraint::Length(1); ops.len()]).split(inner);
