@@ -1,8 +1,9 @@
 ---
 source: tests/render.rs
+assertion_line: 111
 expression: "render(&mut app, 110, 24)"
 ---
-" ← 10.20.4.50  legacy-nfs3.example.org                                                                        "
+" ◀ back  10.20.4.50  legacy-nfs3.example.org                                                                  "
 "┌ Client ────────────────────────────────────────┐┌ Throughput MiB/s: read / write · peak 2.0 MiB/s ─────────┐"
 "│READ        2.0 MiB/s   total 25.4 GiB          ││2.2│                                                     ⠠│"
 "│WRITE         0.0 B/s   total 14.8 GiB          ││   │                                                      │"
@@ -25,4 +26,4 @@ expression: "render(&mut app, 110, 24)"
 "│                                                                                                            │"
 "│                                                                                                            │"
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
-"Esc back  ↑↓ move  ←→/↵ fold  e/c expand/collapse  d hide delegs  / filter  r reload  p pause  ? help         "
+"Esc back  ↑↓ move  ←→/↵ fold  e expand all  c collapse all  d hide delegs  / filter  r reload  p pause  ? help"

@@ -44,6 +44,22 @@ no SSH round-trips, no 30-second sampling windows.
 | `?` | help |
 | `q` / `Ctrl-C` | quit |
 
+**Mouse**
+
+| Action | Effect |
+|---|---|
+| Click a column header | Sort by that column; click it again to reverse. |
+| Click a row | Select the client. |
+| Double-click a row | Open the client. |
+| Click an export or directory in the tree | Expand or collapse it. |
+| Click a file in the tree | Select the file. |
+| Scroll wheel | Moves the selection in the list and scrolls the tree. |
+| Right-click, or click `◀ back` | Go back to the list. |
+| Click a key hint in the footer | Same as pressing that key. |
+
+Run with `--no-mouse` to keep your terminal's own text selection. Most terminals also allow
+Shift+drag to select text while mouse capture is on.
+
 ## Reading the open-files tree
 
 * Each file shows its access (`r-`, `-w`, `rw`), its state types and its name.

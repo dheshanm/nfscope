@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use nfscope::app::{Action, App, SortKey};
+use nfscope::app::{Action, App, SortKey, View};
 use nfscope::files;
 use nfscope::source::{FixtureSource, Source};
 use nfscope::workers::collect;
@@ -210,4 +210,146 @@ fn detail_hide_delegations() {
     // The three cached_*.nii.gz files are held only as delegations.
     assert!(after.contains("delegation-only hidden (30 shown)"), "{after}");
     assert!(!after.contains("sub_020"));
+}
+
+// ------------------------------------------------------------------ mouse
+
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+/// Screen position of the first occurrence of `needle` in a rendered frame.
+fn find(b: &TestBackend, needle: &str) -> (u16, u16) {
+    let buf = b.buffer();
+    for y in 0..buf.area.height {
+        let line: Vec<String> = (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        let joined: String = line.concat();
+        if let Some(byte_idx) = joined.find(needle) {
+            // Convert byte offset to column index (cells may hold multi-byte symbols).
+            let mut acc = 0;
+            for (x, sym) in line.iter().enumerate() {
+                if acc == byte_idx {
+                    return (x as u16, y);
+                }
+                acc += sym.len();
+            }
+        }
+    }
+    panic!("{needle:?} not on screen:\n{b}");
+}
+
+fn click_at(app: &mut App, (x, y): (u16, u16), at: Instant) {
+    app.handle_mouse_at(
+        MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE },
+        at,
+    );
+}
+
+fn mouse(app: &mut App, kind: MouseEventKind, (x, y): (u16, u16)) {
+    app.handle_mouse(MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE });
+}
+
+#[test]
+fn mouse_header_click_sorts_and_reverses() {
+    let (mut app, _) = fixture_app();
+    let t = Instant::now();
+    let b = render(&mut app, 150, 20);
+    click_at(&mut app, find(&b, "WRITE/s"), t);
+    assert_eq!((app.sort, app.sort_desc), (SortKey::Write, true));
+    let b = render(&mut app, 150, 20);
+    assert!(format!("{b}").contains("WRITE/s ▼"));
+    // Clicking the same header again reverses (and isn't mistaken for a double-click on a row).
+    click_at(&mut app, find(&b, "WRITE/s"), t + Duration::from_millis(100));
+    assert_eq!((app.sort, app.sort_desc), (SortKey::Write, false));
+    let b = render(&mut app, 150, 20);
+    assert!(format!("{b}").contains("WRITE/s ▲"));
+    // Text columns start ascending.
+    click_at(&mut app, find(&b, "HOST"), t + Duration::from_secs(5));
+    assert_eq!((app.sort, app.sort_desc), (SortKey::Host, false));
+    // TREND isn't sortable.
+    let b = render(&mut app, 150, 20);
+    click_at(&mut app, find(&b, "TREND"), t + Duration::from_secs(6));
+    assert_eq!(app.sort, SortKey::Host);
+}
+
+#[test]
+fn mouse_row_select_double_click_opens_and_back() {
+    let (mut app, mut src) = fixture_app();
+    let t = Instant::now();
+    let b = render(&mut app, 150, 20);
+    let row = find(&b, "10.20.1.13");
+    click_at(&mut app, row, t);
+    assert_eq!(app.selected, Some("10.20.1.13".parse().unwrap()));
+    assert!(matches!(app.view, nfscope::app::View::Top), "single click only selects");
+    click_at(&mut app, row, t + Duration::from_millis(200));
+    assert!(matches!(&app.view, nfscope::app::View::Detail(d) if d.ip == "10.20.1.13".parse::<IpAddr>().unwrap()));
+    run_actions(&mut app, &mut src);
+    let b = render(&mut app, 130, 40);
+    click_at(&mut app, find(&b, "◀ back"), t + Duration::from_secs(2));
+    assert!(matches!(app.view, nfscope::app::View::Top));
+}
+
+#[test]
+fn mouse_slow_clicks_are_not_double() {
+    let (mut app, _) = fixture_app();
+    let t = Instant::now();
+    let b = render(&mut app, 150, 20);
+    let row = find(&b, "10.20.1.13");
+    click_at(&mut app, row, t);
+    click_at(&mut app, row, t + Duration::from_secs(1));
+    assert!(matches!(app.view, nfscope::app::View::Top));
+}
+
+#[test]
+fn mouse_tree_browsing() {
+    let (mut app, mut src) = fixture_app();
+    app.open_detail("10.20.1.11".parse().unwrap());
+    run_actions(&mut app, &mut src);
+    let t = Instant::now();
+    let b = render(&mut app, 130, 40);
+    // 5 dirs > 4, so dirs start collapsed. Click one to expand it.
+    assert!(!format!("{b}").contains("scan_0000.dcm"));
+    click_at(&mut app, find(&b, "sub_017/"), t);
+    let b = render(&mut app, 130, 40);
+    assert!(format!("{b}").contains("scan_0004.dcm"), "{b}");
+    // Click a file: selects it, doesn't toggle anything.
+    click_at(&mut app, find(&b, "scan_0004.dcm"), t + Duration::from_secs(1));
+    let View::Detail(d) = &app.view else { panic!() };
+    assert_eq!(d.tree_state.selected(), ["/export/data", "sub_017", "scan_0004.dcm"]);
+    // Click the dir again: collapses.
+    let b = render(&mut app, 130, 40);
+    click_at(&mut app, find(&b, "sub_017/"), t + Duration::from_secs(2));
+    let b = render(&mut app, 130, 40);
+    assert!(!format!("{b}").contains("scan_0004.dcm"));
+    // Wheel over the tree scrolls it; right-click goes back.
+    mouse(&mut app, MouseEventKind::ScrollDown, find(&b, "/export/data"));
+    mouse(&mut app, MouseEventKind::Down(MouseButton::Right), (5, 5));
+    assert!(matches!(app.view, nfscope::app::View::Top));
+}
+
+#[test]
+fn mouse_footer_buttons() {
+    let (mut app, mut src) = fixture_app();
+    let t = Instant::now();
+    let b = render(&mut app, 150, 20);
+    click_at(&mut app, find(&b, "p pause"), t);
+    assert!(app.paused);
+    let b = render(&mut app, 150, 20);
+    click_at(&mut app, find(&b, "+ slower"), t + Duration::from_secs(1));
+    assert_eq!(app.interval, Duration::from_secs(3));
+    let b = render(&mut app, 150, 20);
+    click_at(&mut app, find(&b, "? help"), t + Duration::from_secs(2));
+    assert!(app.show_help);
+    click_at(&mut app, (1, 1), t + Duration::from_secs(3)); // any click closes help
+    assert!(!app.show_help);
+
+    app.open_detail("10.20.1.11".parse().unwrap());
+    run_actions(&mut app, &mut src);
+    let b = render(&mut app, 130, 40);
+    click_at(&mut app, find(&b, "d hide delegs"), t + Duration::from_secs(4));
+    let b = render(&mut app, 130, 40);
+    assert!(format!("{b}").contains("d show delegs"));
+    click_at(&mut app, find(&b, "Esc back"), t + Duration::from_secs(5));
+    assert!(matches!(app.view, nfscope::app::View::Top));
+    let b = render(&mut app, 150, 20);
+    click_at(&mut app, find(&b, "q quit"), t + Duration::from_secs(6));
+    assert!(app.quit);
 }

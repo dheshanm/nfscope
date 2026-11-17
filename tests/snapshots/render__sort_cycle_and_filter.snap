@@ -1,5 +1,6 @@
 ---
 source: tests/render.rs
+assertion_line: 92
 expression: "render(&mut app, 150, 12)"
 ---
 "┌ nfscope · testserver ──────────────────────────────────────────────────────────────────────────────── READ = server→client · WRITE = client→server ┐"
@@ -13,4 +14,4 @@ expression: "render(&mut app, 150, 12)"
 "│                                                                                                                                                    │"
 "│                                                                                                                                                    │"
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
-"q quit  ↵ details  s/S sort  / filter  p pause  +/- interval  l log  ? help                                                                           "
+"q quit  ↵ details  s/S sort  / filter  p pause  + slower  - faster  l log  ? help                                                                     "

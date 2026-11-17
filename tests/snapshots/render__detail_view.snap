@@ -1,8 +1,9 @@
 ---
 source: tests/render.rs
+assertion_line: 101
 expression: "render(&mut app, 130, 40)"
 ---
-" ← 10.20.1.11  client-01.example.org  [Linux NFSv4.2 client-01.example.org]                                                       "
+" ◀ back  10.20.1.11  client-01.example.org  [Linux NFSv4.2 client-01.example.org]                                                 "
 "┌ Client ─────────────────────────────────────────────────┐┌ Throughput MiB/s: read / write · peak 111.2 MiB/s ──────────────────┐"
 "│READ      111.1 MiB/s   total 458.2 GiB                  ││122.2│                                                              ⠠│"
 "│WRITE     102.4 KiB/s   total 1.4 GiB                    ││     │                                                               │"
@@ -41,4 +42,4 @@ expression: "render(&mut app, 130, 40)"
 "│                                                                                                                                │"
 "│                                                                                                                                │"
 "└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
-"Esc back  ↑↓ move  ←→/↵ fold  e/c expand/collapse  d hide delegs  / filter  r reload  p pause  ? help                             "
+"Esc back  ↑↓ move  ←→/↵ fold  e expand all  c collapse all  d hide delegs  / filter  r reload  p pause  ? help                    "

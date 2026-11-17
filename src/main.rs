@@ -4,7 +4,8 @@ use std::time::Duration;
 use clap::Parser;
 use color_eyre::eyre::Result;
 use crossbeam_channel::{select, tick, unbounded};
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
+use crossterm::execute;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
@@ -42,6 +43,10 @@ struct Args {
     /// Don't reverse-resolve client addresses.
     #[arg(long)]
     no_dns: bool,
+
+    /// Don't capture the mouse (keeps the terminal's native text selection).
+    #[arg(long)]
+    no_mouse: bool,
 }
 
 fn init_logging(path: &std::path::Path) -> Option<tracing_appender::non_blocking::WorkerGuard> {
@@ -104,12 +109,23 @@ fn main() -> Result<()> {
     let anim = tick(Duration::from_millis(150));
 
     let mut terminal = ratatui::init();
+    if !args.no_mouse {
+        execute!(std::io::stdout(), EnableMouseCapture)?;
+        // ratatui's panic hook restores the screen; also release the mouse so the shell isn't left
+        // receiving mouse escape sequences.
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = execute!(std::io::stdout(), DisableMouseCapture);
+            prev(info);
+        }));
+    }
     let res: Result<()> = (|| {
         loop {
             terminal.draw(|f| nfscope::ui::draw(f, &mut app))?;
             select! {
                 recv(key_rx) -> ev => match ev? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => app.handle_key(k),
+                    Event::Mouse(m) => app.handle_mouse(m),
                     _ => {}
                 },
                 recv(sample_rx) -> s => app.on_sample(s?),
@@ -135,6 +151,9 @@ fn main() -> Result<()> {
             }
         }
     })();
+    if !args.no_mouse {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
     res
 }

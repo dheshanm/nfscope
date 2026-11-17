@@ -5,7 +5,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Sparkline, Table};
 use throbber_widgets_tui::Throbber;
 
-use super::{DIM, READ, WRITE, keys_line, status_lines};
+use crossterm::event::KeyCode;
+use ratatui::layout::Flex;
+
+use super::{DIM, READ, WRITE, footer as draw_footer, status_lines};
 use crate::app::{App, SortKey};
 use crate::fmt;
 
@@ -25,21 +28,28 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(Paragraph::new(status), banner);
     draw_table(f, table, app);
 
-    let footer_line = if app.filter_editing {
-        Line::from(vec![Span::raw(" filter: ").yellow(), Span::raw(format!("{}█", app.filter))])
+    if app.filter_editing {
+        let line = Line::from(vec![Span::raw(" filter: ").yellow(), Span::raw(format!("{}█", app.filter))]);
+        f.render_widget(Paragraph::new(line), footer);
     } else {
-        keys_line(&[
-            ("q", "quit"),
-            ("↵", "details"),
-            ("s/S", "sort"),
-            ("/", "filter"),
-            ("p", "pause"),
-            ("+/-", "interval"),
-            ("l", "log"),
-            ("?", "help"),
-        ])
-    };
-    f.render_widget(Paragraph::new(footer_line), footer);
+        use KeyCode::Char;
+        draw_footer(
+            f,
+            footer,
+            &[
+                ("q", "quit", Some(Char('q'))),
+                ("↵", "details", Some(KeyCode::Enter)),
+                ("s/S", "sort", Some(Char('s'))),
+                ("/", "filter", Some(Char('/'))),
+                ("p", "pause", Some(Char('p'))),
+                ("+", "slower", Some(Char('+'))),
+                ("-", "faster", Some(Char('-'))),
+                ("l", "log", Some(Char('l'))),
+                ("?", "help", Some(Char('?'))),
+            ],
+            &mut app.hit,
+        );
+    }
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &mut App) {
@@ -163,9 +173,25 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     if !app.filter.is_empty() {
         title.push(Span::raw(format!("filter: {} ", app.filter)).yellow());
     }
+    // Record clickable header cells / body rows, laid out exactly as Table does it.
+    let block = Block::bordered().title(Line::from(title));
+    let inner = block.inner(area);
+    let col_rects = Layout::horizontal(widths.clone()).flex(Flex::Start).spacing(1).split(Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        1.min(inner.height),
+    ));
+    for ((_, key, _), r) in cols.iter().zip(col_rects.iter()) {
+        if let Some(k) = key {
+            app.hit.sort_headers.push((*r, *k));
+        }
+    }
+    app.hit.table_body = Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1));
+
     let table = Table::new(body, widths)
         .header(header)
-        .block(Block::bordered().title(Line::from(title)))
+        .block(block)
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
         .column_spacing(1);
     f.render_stateful_widget(table, area, &mut app.table_state);

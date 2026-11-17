@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::TableState;
 use throbber_widgets_tui::ThrobberState;
 use tui_tree_widget::TreeState;
@@ -15,6 +16,23 @@ use crate::files::OpenFiles;
 use crate::model::{ClientStat, Model, RawSample};
 
 pub const INTERVALS: [u64; 8] = [1, 2, 3, 5, 10, 15, 30, 60];
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const WHEEL_LINES: usize = 3;
+
+/// Clickable regions recorded by the UI during the last draw.
+#[derive(Debug, Default, Clone)]
+pub struct HitMap {
+    /// Client table header cells that sort.
+    pub sort_headers: Vec<(Rect, SortKey)>,
+    /// Where client table rows are drawn (excluding header).
+    pub table_body: Rect,
+    /// Detail view "back" button.
+    pub back: Rect,
+    /// Detail view open-files tree.
+    pub tree: Rect,
+    /// Footer hints and other buttons: clicking acts like pressing the key.
+    pub buttons: Vec<(Rect, KeyCode)>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
@@ -103,6 +121,8 @@ pub struct App {
     pub quit: bool,
     pub actions: Vec<Action>,
     pub matcher: Matcher,
+    pub hit: HitMap,
+    last_click: Option<(Instant, Position)>,
 }
 
 impl App {
@@ -127,6 +147,8 @@ impl App {
             quit: false,
             actions: Vec::new(),
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
+            hit: HitMap::default(),
+            last_click: None,
         }
     }
 
@@ -351,6 +373,102 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Sort by `key`; choosing the current sort column again reverses it.
+    pub fn set_sort(&mut self, key: SortKey) {
+        if self.sort == key {
+            self.sort_desc = !self.sort_desc;
+        } else {
+            self.sort = key;
+            self.sort_desc = key.default_desc();
+        }
+    }
+
+    pub fn handle_mouse(&mut self, m: MouseEvent) {
+        self.handle_mouse_at(m, Instant::now());
+    }
+
+    /// Mouse handling with an explicit clock (for double-click detection in tests).
+    pub fn handle_mouse_at(&mut self, m: MouseEvent, now: Instant) {
+        let pos = Position::new(m.column, m.row);
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let double =
+                    self.last_click.is_some_and(|(t, p)| p == pos && now.saturating_duration_since(t) <= DOUBLE_CLICK);
+                self.last_click = if double { None } else { Some((now, pos)) };
+                self.click(pos, double);
+            }
+            MouseEventKind::Down(MouseButton::Right) if !self.show_help => {
+                if matches!(self.view, View::Detail(_)) {
+                    self.view = View::Top;
+                }
+            }
+            MouseEventKind::ScrollUp => self.wheel(pos, -1),
+            MouseEventKind::ScrollDown => self.wheel(pos, 1),
+            _ => {}
+        }
+    }
+
+    fn click(&mut self, pos: Position, double: bool) {
+        if self.show_help {
+            self.show_help = false;
+            return;
+        }
+        if let Some(&(_, code)) = self.hit.buttons.iter().find(|(r, _)| r.contains(pos)) {
+            self.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+            return;
+        }
+        // Clicking anywhere else finishes filter editing (keeping the filter text).
+        match &mut self.view {
+            View::Top => self.filter_editing = false,
+            View::Detail(d) => d.filter_editing = false,
+        }
+        match &mut self.view {
+            View::Top => {
+                if let Some(&(_, key)) = self.hit.sort_headers.iter().find(|(r, _)| r.contains(pos)) {
+                    self.set_sort(key);
+                } else if self.hit.table_body.contains(pos) {
+                    let idx = self.table_state.offset() + (pos.y - self.hit.table_body.y) as usize;
+                    if let Some(ip) = self.rows().get(idx).map(|c| c.ip) {
+                        self.selected = Some(ip);
+                        if double {
+                            self.open_detail(ip);
+                        }
+                    }
+                }
+            }
+            View::Detail(d) => {
+                if self.hit.back.contains(pos) {
+                    self.view = View::Top;
+                } else if let Some(id) = d.tree_state.rendered_at(pos).map(<[String]>::to_vec) {
+                    // export / dir nodes fold on a single click; files just get selected.
+                    let is_node = id.len() < 3;
+                    d.tree_state.select(id.clone());
+                    if is_node {
+                        d.tree_state.toggle(id);
+                    }
+                }
+            }
+        }
+    }
+
+    fn wheel(&mut self, pos: Position, dir: isize) {
+        if self.show_help {
+            return;
+        }
+        match &mut self.view {
+            View::Top => self.move_selection(dir),
+            View::Detail(d) => {
+                if self.hit.tree.contains(pos) {
+                    if dir < 0 {
+                        d.tree_state.scroll_up(WHEEL_LINES);
+                    } else {
+                        d.tree_state.scroll_down(WHEEL_LINES);
+                    }
+                }
+            }
         }
     }
 

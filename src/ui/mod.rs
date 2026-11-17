@@ -7,13 +7,16 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-use crate::app::{App, View};
+use crossterm::event::KeyCode;
+
+use crate::app::{App, HitMap, View};
 
 pub const READ: Color = Color::Cyan;
 pub const WRITE: Color = Color::Magenta;
 pub const DIM: Color = Color::DarkGray;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    app.hit = HitMap::default();
     let area = f.area();
     let [main, log] = if app.show_log {
         Layout::vertical([Constraint::Min(5), Constraint::Length(10)]).areas(area)
@@ -39,14 +42,24 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// `key desc  key desc ...` footer line.
-pub fn keys_line<'a>(pairs: &[(&'a str, &'a str)]) -> Line<'a> {
+/// Render a `key desc  key desc ...` footer. Hints with a key code become clickable buttons.
+pub fn footer(f: &mut Frame, area: Rect, pairs: &[(&str, &str, Option<KeyCode>)], hits: &mut HitMap) {
     let mut spans = Vec::new();
-    for (k, d) in pairs {
-        spans.push(Span::styled(*k, Style::new().add_modifier(Modifier::BOLD).fg(Color::Yellow)));
-        spans.push(Span::raw(format!(" {d}  ")));
+    let mut x = area.x;
+    for (k, d, code) in pairs {
+        let key = Span::styled(k.to_string(), Style::new().add_modifier(Modifier::BOLD).fg(Color::Yellow));
+        let desc = Span::raw(format!(" {d}"));
+        let w = (key.width() + desc.width()) as u16;
+        if let Some(code) = code {
+            let r = Rect::new(x, area.y, w, 1).intersection(area);
+            if !r.is_empty() {
+                hits.buttons.push((r, *code));
+            }
+        }
+        x = x.saturating_add(w + 2);
+        spans.extend([key, desc, Span::raw("  ")]);
     }
-    Line::from(spans)
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 pub fn status_lines(app: &App) -> Vec<Line<'static>> {
@@ -78,6 +91,8 @@ fn help(f: &mut Frame, area: Rect) {
         ("r", "detail: reload open files"),
         ("d", "detail: hide files held only as cached delegations"),
         ("l", "toggle log pane"),
+        ("mouse", "click header: sort (again: reverse) · double-click row: open"),
+        ("", "click tree node: fold · wheel: scroll · right-click: back"),
         ("q / Ctrl-C", "quit"),
     ];
     let mut lines = vec![

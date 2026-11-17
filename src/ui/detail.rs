@@ -11,7 +11,9 @@ use ratatui::widgets::{Axis, Block, Cell, Chart, Dataset, GraphType, Paragraph, 
 use throbber_widgets_tui::Throbber;
 use tui_tree_widget::{Tree, TreeItem};
 
-use super::{DIM, READ, WRITE, keys_line, status_lines};
+use crossterm::event::KeyCode;
+
+use super::{DIM, READ, WRITE, footer as draw_footer, status_lines};
 use crate::app::{App, Detail, View};
 use crate::files::{OpenFile, OpenFiles};
 use crate::fmt;
@@ -41,7 +43,14 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
         Some(crate::app::Dns::Name(n)) => n.clone(),
         _ => String::new(),
     };
-    let mut t = vec![Span::raw(" ← ").fg(DIM), Span::raw(d.ip.to_string()).bold(), Span::raw(format!("  {host}"))];
+    const BACK: &str = " ◀ back ";
+    app.hit.back = Rect::new(title.x, title.y, (BACK.chars().count() as u16).min(title.width), title.height.min(1));
+    let mut t = vec![
+        Span::raw(BACK).black().on_gray(),
+        Span::raw(" "),
+        Span::raw(d.ip.to_string()).bold(),
+        Span::raw(format!("  {host}")),
+    ];
     if let Some(n) = stat.and_then(ClientStat::nfs_name) {
         t.push(Span::raw(format!("  [{n}]")).fg(DIM));
     }
@@ -61,23 +70,31 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
     draw_chart(f, chart, stat);
     draw_conns(f, conns, stat);
     draw_files(f, files, d, &mut app.matcher, &app.throbber);
+    app.hit.tree = files;
 
-    let footer_line = if d.filter_editing {
-        Line::from(vec![Span::raw(" filter files: ").yellow(), Span::raw(format!("{}█", d.filter))])
+    if d.filter_editing {
+        let line = Line::from(vec![Span::raw(" filter files: ").yellow(), Span::raw(format!("{}█", d.filter))]);
+        f.render_widget(Paragraph::new(line), footer);
     } else {
-        keys_line(&[
-            ("Esc", "back"),
-            ("↑↓", "move"),
-            ("←→/↵", "fold"),
-            ("e/c", "expand/collapse"),
-            ("d", "hide delegs"),
-            ("/", "filter"),
-            ("r", "reload"),
-            ("p", "pause"),
-            ("?", "help"),
-        ])
-    };
-    f.render_widget(Paragraph::new(footer_line), footer);
+        use KeyCode::Char;
+        draw_footer(
+            f,
+            footer,
+            &[
+                ("Esc", "back", Some(KeyCode::Esc)),
+                ("↑↓", "move", None),
+                ("←→/↵", "fold", Some(KeyCode::Enter)),
+                ("e", "expand all", Some(Char('e'))),
+                ("c", "collapse all", Some(Char('c'))),
+                ("d", if d.hide_deleg { "show delegs" } else { "hide delegs" }, Some(Char('d'))),
+                ("/", "filter", Some(Char('/'))),
+                ("r", "reload", Some(Char('r'))),
+                ("p", "pause", Some(Char('p'))),
+                ("?", "help", Some(Char('?'))),
+            ],
+            &mut app.hit,
+        );
+    }
 }
 
 fn kv<'a>(k: &'a str, v: impl Into<Span<'a>>) -> Line<'a> {
