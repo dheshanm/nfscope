@@ -476,3 +476,26 @@ fn server_overlay_keeps_its_place_and_dims_background() {
     let b = render(&mut app, 120, 40);
     assert_eq!(corner(&b), at);
 }
+
+/// Full-height graph cells paint their background, so stacked rows join without a seam
+/// even when the terminal's line height is taller than the `█` glyph.
+#[test]
+fn sparkline_full_cells_fill_background() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+    let area = Rect::new(0, 0, 3, 2);
+    let mut buf = Buffer::empty(area);
+    // newest first: full (2 rows), 1.5 rows, 0.25 rows
+    nfscope::ui::sparkline(&mut buf, area, &[100.0, 75.0, 12.5], 100.0, Color::Blue);
+    let cell = |x, y| (buf[(x, y)].symbol().to_string(), buf[(x, y)].bg);
+    // Rightmost column: both rows full, both background-filled.
+    assert_eq!(cell(2, 0), ("█".into(), Color::Blue));
+    assert_eq!(cell(2, 1), ("█".into(), Color::Blue));
+    // Middle column: bottom full (filled), top half glyph on the default background.
+    assert_eq!(cell(1, 1), ("█".into(), Color::Blue));
+    assert_eq!(cell(1, 0), ("▄".into(), Color::Reset));
+    // Left column: a quarter cell, no background.
+    assert_eq!(cell(0, 1), ("▂".into(), Color::Reset));
+    assert_eq!(cell(0, 0).0, " ");
+}

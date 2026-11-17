@@ -218,8 +218,18 @@ pub fn sparkline(buf: &mut ratatui::buffer::Buffer, area: Rect, newest_first: &[
         }
         for r in 0..area.height {
             let level = eighths.saturating_sub(r * 8).min(8) as usize;
-            if level > 0 {
-                buf[(x, area.bottom() - 1 - r)].set_symbol(BARS[level]).set_fg(color);
+            let cell = &mut buf[(x, area.bottom() - 1 - r)];
+            match level {
+                0 => {}
+                // Full cell: paint the background too. A `█` glyph only covers the font's glyph
+                // box, so with any line spacing a thin seam shows between stacked rows; the cell
+                // background always covers the whole line, so stacked rows join seamlessly.
+                8 => {
+                    cell.set_symbol(BARS[8]).set_fg(color).set_bg(color);
+                }
+                _ => {
+                    cell.set_symbol(BARS[level]).set_fg(color);
+                }
             }
         }
     }
