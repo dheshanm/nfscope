@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use crate::inflight::{ClientLoad, InflightLoad};
 use crate::parse::nfsd::ClientInfo;
 use crate::parse::rpc::{NfsdStats, ThreadLoad};
 use crate::parse::ss::Sock;
@@ -21,6 +22,8 @@ pub struct RawSample {
     pub clients: Result<Vec<ClientInfo>, String>,
     /// Server-wide nfsd counters (`/proc/net/rpc/nfsd` plus pool stats).
     pub nfsd: Result<NfsdStats, String>,
+    /// RPCs nfsd was working on during the interval (nfsd netlink, Linux 6.7+).
+    pub inflight: Result<InflightLoad, String>,
 }
 
 /// Server-wide nfsd rates over the last interval.
@@ -200,6 +203,9 @@ pub struct ClientStat {
     pub conn_health: HashMap<u16, SockHealth>,
     /// Consecutive ticks each flag's condition has held, in `Flag::ALL` order.
     streaks: [u8; 5],
+    /// nfsd threads this client's requests kept busy over the last interval. None when
+    /// in-flight RPCs are unavailable.
+    pub inflight: Option<ClientLoad>,
 }
 
 impl ClientStat {
@@ -216,6 +222,7 @@ impl ClientStat {
             health: ClientHealth::default(),
             conn_health: HashMap::new(),
             streaks: [0; 5],
+            inflight: None,
         }
     }
 
@@ -226,6 +233,11 @@ impl ClientStat {
 
     pub fn total_bps(&self) -> f64 {
         self.read_bps + self.write_bps
+    }
+
+    /// Average nfsd threads busy with this client's requests (0 when unknown).
+    pub fn threads(&self) -> f64 {
+        self.inflight.as_ref().map_or(0.0, |l| l.avg)
     }
 
     /// The most relevant NFSv4 record: confirmed first, then most recently renewed.
@@ -263,6 +275,10 @@ pub struct Model {
     pub server_error: Option<String>,
     /// History of `ServerRates::busy_pct`.
     pub server_busy: VecDeque<f64>,
+    /// RPCs in flight over the last interval (None while unavailable).
+    pub inflight: Option<InflightLoad>,
+    /// Why in-flight RPCs are unavailable, if they are.
+    pub inflight_error: Option<String>,
 }
 
 /// Rates between two nfsd snapshots, or None if a counter went backwards (nfsd restarted).
@@ -400,6 +416,10 @@ impl Model {
         let start = *self.start.get_or_insert(s.mono);
         self.last_wall = Some(s.wall.clone());
         self.ingest_server(&s);
+        (self.inflight, self.inflight_error) = match s.inflight {
+            Ok(ref l) => (Some(l.clone()), None),
+            Err(ref e) => (None, Some(e.clone())),
+        };
         let mut infos = self.update_infos(&s);
         let socks = match &s.socks {
             Ok(v) => {
@@ -451,6 +471,10 @@ impl Model {
         let (mut tr, mut tw) = (0.0, 0.0);
         for (ip, c) in next.iter_mut() {
             c.infos = infos.remove(ip).unwrap_or_default();
+            c.inflight = self
+                .inflight
+                .as_ref()
+                .map(|l| l.client(*ip).cloned().unwrap_or(ClientLoad { ip: Some(*ip), ..Default::default() }));
             c.conns.sort_by_key(|k| k.port);
             for (n, on) in c.streaks.iter_mut().zip(c.health.conditions()) {
                 *n = if on { n.saturating_add(1) } else { 0 };
@@ -483,7 +507,14 @@ mod tests {
     }
 
     fn sample(at: Instant, socks: Vec<Sock>) -> RawSample {
-        RawSample { mono: at, wall: "00:00:00".into(), socks: Ok(socks), clients: Ok(vec![]), nfsd: Err("none".into()) }
+        RawSample {
+            mono: at,
+            wall: "00:00:00".into(),
+            socks: Ok(socks),
+            clients: Ok(vec![]),
+            nfsd: Err("none".into()),
+            inflight: Err("none".into()),
+        }
     }
 
     const MB: u64 = 1 << 20;

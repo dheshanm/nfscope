@@ -1,0 +1,6 @@
+# In-flight nfsd RPCs (synthetic), the `nfscope --dump-inflight` format. NFSv4 ops: 53 SEQUENCE,
+# 22 PUTFH, 25 READ, 38 WRITE, 5 COMMIT, 9 GETATTR, 3 ACCESS. NFSv3 procs: 6 READ, 7 WRITE.
+10.20.1.11:700 xid=0x5f1c0001 prog=100003 vers=4 proc=1 age_us=310 ops=53,22,25
+10.20.1.11:701 xid=0x5f1c0002 prog=100003 vers=4 proc=1 age_us=1240 ops=53,22,25
+10.20.2.21:706 xid=0x2a000010 prog=100003 vers=4 proc=1 age_us=1340000 ops=53,22,5
+10.20.4.50:710 xid=0x77000001 prog=100003 vers=3 proc=7 age_us=8800

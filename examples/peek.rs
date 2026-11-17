@@ -1,4 +1,6 @@
-//! Render a fixture directory once to stdout (debug aid): `[TICKS=n] cargo run --example peek -- DIR [ip]`
+//! Render a fixture directory once to stdout (debug aid):
+//! `[TICKS=n] [KEYS=keys] cargo run --example peek -- DIR [ip]`. KEYS are pressed before the
+//! frame is drawn, e.g. `KEYS=i` for the in-flight overlay or `KEYS=sss` to sort by THREADS.
 use std::time::{Duration, Instant};
 
 use nfscope::app::{Action, App};
@@ -33,6 +35,12 @@ fn main() {
             }
             _ => {}
         }
+    }
+    for c in std::env::var("KEYS").unwrap_or_default().chars() {
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        ));
     }
     let mut t = Terminal::new(TestBackend::new(170, 45)).unwrap();
     t.draw(|f| nfscope::ui::draw(f, &mut app)).unwrap();

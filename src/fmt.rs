@@ -27,6 +27,17 @@ pub fn duration(secs: f64) -> String {
     }
 }
 
+/// How long a request has been running: `850µs`, `4.2 ms`, `120 ms`, `1.24 s`, `2m30s`.
+pub fn latency(us: u64) -> String {
+    match us {
+        0..1_000 => format!("{us}µs"),
+        1_000..9_950 => format!("{:.1} ms", us as f64 / 1e3),
+        9_950..999_500 => format!("{} ms", (us as f64 / 1e3).round() as u64),
+        999_500..59_995_000 => format!("{:.2} s", us as f64 / 1e6),
+        _ => duration(us as f64 / 1e6),
+    }
+}
+
 /// Compact count: `950`, `12.3k`, `1.2M`.
 pub fn count(n: f64) -> String {
     let n = n.max(0.0);
@@ -103,6 +114,16 @@ mod tests {
         assert_eq!(duration(120.0), "2m");
         assert_eq!(duration(150.0), "2m30s");
         assert_eq!(duration(3900.0), "1h05m");
+    }
+
+    #[test]
+    fn latencies() {
+        assert_eq!(latency(850), "850µs");
+        assert_eq!(latency(4_240), "4.2 ms");
+        assert_eq!(latency(119_600), "120 ms");
+        assert_eq!(latency(999_600), "1.00 s");
+        assert_eq!(latency(1_244_000), "1.24 s");
+        assert_eq!(latency(150_000_000), "2m30s");
     }
 
     #[test]

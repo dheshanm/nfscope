@@ -8,6 +8,7 @@ use std::process::Command;
 use color_eyre::eyre::{Result, WrapErr, eyre};
 
 use crate::files::{FindEnd, FindResult, Target, find_paths};
+use crate::parse::inflight::{InflightRpc, parse_snapshot};
 use crate::parse::ss::{Sock, parse_ss, render_ss};
 
 /// How long a full-path search may walk an export before giving up.
@@ -30,6 +31,8 @@ pub trait Source: Send {
     fn pool_stats(&mut self) -> Result<String>;
     /// Current scheduler state of the nfsd threads, as `<state letter> <count>` lines.
     fn nfsd_thread_states(&mut self) -> Result<String>;
+    /// The RPCs nfsd threads are working on right now (nfsd netlink `rpc-status-get`).
+    fn rpc_status(&mut self) -> Result<Vec<InflightRpc>>;
     /// Full paths of `targets` on the filesystem mounted at `root` (see [`find_paths`]).
     fn find_paths(
         &mut self,
@@ -101,11 +104,12 @@ pub struct LiveSource {
     nfsd_stats: Vec<PathBuf>,
     /// `/proc/fs/nfsd/threads` when `nfsd_stats` was built; a change triggers a rescan.
     nfsd_threads_at_scan: Option<String>,
+    rpc_status: RpcStatus,
 }
 
 impl LiveSource {
     pub fn new(nfsd_dir: PathBuf) -> Self {
-        Self { nfsd_dir, nfsd_stats: Vec::new(), nfsd_threads_at_scan: None }
+        Self { nfsd_dir, nfsd_stats: Vec::new(), nfsd_threads_at_scan: None, rpc_status: RpcStatus::default() }
     }
 
     fn configured_threads(&self) -> Option<String> {
@@ -141,6 +145,77 @@ impl LiveSource {
             *counts.entry(state).or_default() += 1;
         }
         Some(counts.iter().map(|(s, n)| format!("{s} {n}\n")).collect())
+    }
+}
+
+/// After a failed in-flight dump, how long to keep reporting that error before trying again.
+/// The sampler asks ~10x per interval, and most failures (old kernel, nfsd stopped) persist.
+const RPC_STATUS_RETRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The nfsd generic-netlink connection used for in-flight RPCs, opened on first use.
+#[derive(Default)]
+struct RpcStatus {
+    /// Socket and the nfsd family id.
+    #[cfg(target_os = "linux")]
+    conn: Option<(crate::netlink::GenlSocket, u16)>,
+    failed: Option<(std::time::Instant, String)>,
+}
+
+impl RpcStatus {
+    fn get(&mut self) -> Result<Vec<InflightRpc>> {
+        if let Some((at, e)) = &self.failed
+            && at.elapsed() < RPC_STATUS_RETRY
+        {
+            return Err(eyre!("{e}"));
+        }
+        match self.dump() {
+            Ok(v) => {
+                self.failed = None;
+                Ok(v)
+            }
+            Err(e) => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.conn = None;
+                }
+                if self.failed.is_none() {
+                    tracing::info!("in-flight RPCs unavailable: {e}");
+                }
+                self.failed = Some((std::time::Instant::now(), e.clone()));
+                Err(eyre!(e))
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn dump(&mut self) -> std::result::Result<Vec<InflightRpc>, String> {
+        use crate::netlink::{GenlSocket, attrs, monotonic_us};
+        use crate::parse::inflight::RPC_STATUS_GET;
+        let why = |e: std::io::Error| match e.raw_os_error() {
+            Some(libc::ENODEV) => "nfsd is not running".to_string(),
+            Some(libc::EOPNOTSUPP) => "this kernel's nfsd netlink has no rpc-status (needs Linux 6.7+)".to_string(),
+            Some(libc::EPERM | libc::EACCES) => format!("nfsd netlink: {e} (run as root)"),
+            _ => format!("nfsd netlink: {e}"),
+        };
+        if self.conn.is_none() {
+            let mut s = GenlSocket::open().map_err(why)?;
+            let id = s
+                .family_id("nfsd")
+                .map_err(why)?
+                .ok_or("no nfsd netlink family (needs Linux 6.7+ with nfsd loaded)")?;
+            self.conn = Some((s, id));
+        }
+        let (s, id) = self.conn.as_mut().expect("opened above");
+        let mut raw: Vec<Vec<u8>> = Vec::new();
+        s.dump(*id, RPC_STATUS_GET, 1, |a| raw.push(a.to_vec())).map_err(why)?;
+        // Read the clock after the dump: every start stamp is then in the past.
+        let now = monotonic_us();
+        Ok(raw.iter().filter_map(|a| InflightRpc::from_attrs(attrs(a), now)).collect())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn dump(&mut self) -> std::result::Result<Vec<InflightRpc>, String> {
+        Err("in-flight RPCs need Linux (nfsd netlink)".into())
     }
 }
 
@@ -211,6 +286,10 @@ impl Source for LiveSource {
         self.cached_thread_states().ok_or_else(|| eyre!("no nfsd threads running"))
     }
 
+    fn rpc_status(&mut self) -> Result<Vec<InflightRpc>> {
+        self.rpc_status.get()
+    }
+
     fn find_paths(
         &mut self,
         root: &str,
@@ -234,6 +313,7 @@ impl Source for LiveSource {
 /// DIR/rpc/*.txt             (optional) /proc/net/rpc/nfsd snapshots, replayed in name order
 /// DIR/pool/*.txt            (optional) /proc/fs/nfsd/pool_stats snapshots, likewise
 /// DIR/threads/*.txt         (optional) nfsd thread states (`R 1` / `D 8` / `I 55` lines), cycled
+/// DIR/inflight/*.txt        (optional) in-flight RPCs (`nfscope --dump-inflight` lines), cycled
 /// DIR/paths                 (optional) "<inode, decimal> <full path>" lines answering find_paths
 /// ```
 ///
@@ -248,13 +328,14 @@ pub struct FixtureSource {
     rpc_tick: u64,
     pool_tick: u64,
     threads_tick: usize,
+    inflight_tick: usize,
     /// (current counters, per-socket base delta) once replay is exhausted.
     synth: Option<Synth>,
 }
 
 impl FixtureSource {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, tick: 0, rpc_tick: 0, pool_tick: 0, threads_tick: 0, synth: None }
+        Self { dir, tick: 0, rpc_tick: 0, pool_tick: 0, threads_tick: 0, inflight_tick: 0, synth: None }
     }
 
     fn snapshots(&self) -> Result<Vec<PathBuf>> {
@@ -365,6 +446,16 @@ impl Source for FixtureSource {
         }
         self.threads_tick += 1;
         Ok(fs::read_to_string(&files[(self.threads_tick - 1) % files.len()])?)
+    }
+
+    fn rpc_status(&mut self) -> Result<Vec<InflightRpc>> {
+        // Snapshots too: cycle through them.
+        let files = self.series("inflight")?;
+        if files.is_empty() {
+            return Err(eyre!("empty series"));
+        }
+        self.inflight_tick += 1;
+        Ok(parse_snapshot(&fs::read_to_string(&files[(self.inflight_tick - 1) % files.len()])?))
     }
 
     fn find_paths(

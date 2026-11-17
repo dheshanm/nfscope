@@ -54,6 +54,11 @@ struct Args {
     /// the way the `f` key does, prints what it finds and exits. PARENT/NAME `/` = name unknown.
     #[arg(long, num_args = 3, value_names = ["MOUNT", "PARENT/NAME", "INODE"], hide = true)]
     find: Option<Vec<String>>,
+
+    /// Print the RPCs nfsd is working on right now, one per line, and exit. The output is the
+    /// fixture format: save a few runs as `DIR/inflight/001.txt`, … to replay them.
+    #[arg(long, hide = true)]
+    dump_inflight: bool,
 }
 
 fn init_logging(path: &std::path::Path) -> Option<tracing_appender::non_blocking::WorkerGuard> {
@@ -80,12 +85,18 @@ fn main() -> Result<()> {
     if let Some(f) = &args.find {
         return find_cli(&f[0], &f[1], &f[2]);
     }
-    let _guard = init_logging(&args.log);
-
     let spec = match &args.fixture {
         Some(dir) => SourceSpec::Fixture(dir.clone()),
         None => SourceSpec::Live { nfsd_dir: args.nfsd_dir.clone() },
     };
+    if args.dump_inflight {
+        for rpc in spec.build().rpc_status()? {
+            println!("{rpc}");
+        }
+        return Ok(());
+    }
+    let _guard = init_logging(&args.log);
+
     tracing::info!("starting nfscope: {spec:?}, interval {}s, port {}", args.interval, args.port);
 
     let interval = Duration::from_secs(args.interval.max(1));

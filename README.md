@@ -51,6 +51,27 @@ The third header line is **nfsd server health**: `nfsd 14/128 busy ↑41  4.1k o
   * the busiest operations from `/proc/net/rpc/nfsd`, with NFSv3 and NFSv4 merged.
     Per-request bookkeeping ops (PUTFH, SEQUENCE, …) are left out.
 
+### Requests in flight: who is holding the nfsd threads
+
+"14/128 busy" says how loaded the server is; the in-flight view says **who** is loading it.
+nfscope asks the kernel which RPC each nfsd thread is working on right now (the nfsd
+generic-netlink `rpc-status-get` dump), at the same ~10 snapshots per interval as the thread
+states. This needs Linux 6.7 or newer, or a backport (the RHEL 9.8 kernel has it). On older
+kernels everything else works and the views below explain why this one is missing.
+
+* **THREADS** column in the client list: nfsd threads busy with this client's requests,
+  averaged over the interval (each request counts once per snapshot it appears in). It is
+  request rate × request time, so a client with modest throughput but slow requests can hold
+  more threads than the busiest one by MiB/s. Yellow means one of its requests has been
+  running for a second or more. Sortable like the other columns.
+* **`i`** opens the in-flight panel (`o` and `i` switch between the two server panels):
+  * threads held per client and per operation (a COMPOUND is named by its first real op,
+    so `SEQUENCE PUTFH READ` counts as READ), with the oldest request of each;
+  * the longest-running requests seen during the interval, and whether they are still running.
+* The drill-down shows the client's line: `nfsd 3.0 threads avg · peak 4 · oldest 1.34 s`.
+* A request's age runs from when an nfsd thread took it off the connection. NFSv3 clients are
+  covered too, unlike the open-files tree.
+
 * **READ** = server → client (the client is reading); **WRITE** = client → server.
 * Rates come from per-socket TCP counters (`ss -tni`: `bytes_acked` / `bytes_received`)
   on port 2049. They are diffed every tick and summed per client IP, so nconnect is handled.
@@ -89,6 +110,7 @@ The third header line is **nfsd server health**: `nfsd 14/128 busy ↑41  4.1k o
 | `p` | pause the display (sampling continues, so rates are right on resume) |
 | `+` / `-` | sampling interval (1–60 s) |
 | `o` | nfsd server health: busy threads, request rates, ops/s by operation |
+| `i` | requests in flight: which clients and operations hold nfsd threads, slowest requests |
 | `← →` `e` `c` | drill-down: collapse/expand, expand all, collapse all |
 | `d` | drill-down: hide files the client only holds a cached **delegation** for |
 | `r` | drill-down: reload open state |
@@ -168,6 +190,7 @@ e.g. `RUST_LOG=debug`), and are also visible in the `l` pane.
 cargo test                                  # parsers, rate maths, insta UI snapshots
 cargo run -- --fixture tests/fixtures       # run the TUI on synthetic data (works on macOS)
 cargo run --example peek -- tests/fixtures 10.20.1.11   # print one rendered frame
+KEYS=i cargo run --example peek -- tests/fixtures       # …after pressing keys (here: in-flight panel)
 ```
 
 `tests/fixtures/` is synthetic: `example.org` hosts and made-up paths. To test against a
@@ -183,7 +206,12 @@ cargo run -- --fixture tests/fixtures/local
 The capture script replaces every file and directory name in `states` with a pseudonym
 **on the server**. It aborts if any original name would survive. Export paths (in
 `mountinfo`) and client host names (in `hosts`) are kept, so the directory stays out of git.
+If the server has an nfscope new enough for `--dump-inflight` (point `NFSCOPE=` at it,
+e.g. `ssh root@SERVER 'NFSCOPE=/tmp/nfscope bash -s' < …`), it also saves a few in-flight
+snapshots: client addresses, XIDs and op numbers, no file names. `nfscope --dump-inflight`
+on its own prints the current list, which is handy for checking a kernel.
 
-Layout: `src/parse/` (ss / nfsd / mountinfo parsers), `src/model.rs` (rates, history),
+Layout: `src/parse/` (ss / nfsd / mountinfo / in-flight parsers), `src/netlink.rs` (generic
+netlink client), `src/inflight.rs` (in-flight averages), `src/model.rs` (rates, history),
 `src/files.rs` (open-state aggregation), `src/source.rs` (live vs fixture), `src/workers.rs`
 (sampler / states / DNS threads), `src/app.rs` (state + keys), `src/ui/` (ratatui views).

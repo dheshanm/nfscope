@@ -29,10 +29,12 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
 
     let n_conns = stat.map_or(0, |c| c.conns.len()).clamp(1, 4) as u16;
     let n_flags = stat.map_or(0, |c| c.flags().len()) as u16;
+    // One more row for the `nfsd` (in-flight) line when the kernel reports it.
+    let info_h = 9 + u16::from(stat.is_some_and(|c| c.inflight.is_some()));
     let [title, banner, stats, conns, files, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(status.len() as u16),
-        Constraint::Length(9),
+        Constraint::Length(info_h),
         Constraint::Length(n_conns + n_flags + 3),
         Constraint::Min(5),
         Constraint::Length(1),
@@ -132,6 +134,21 @@ fn draw_info(f: &mut Frame, area: Rect, stat: Option<&ClientStat>, has_rates: bo
         c.health.retrans_ps.map_or("…".into(), |r| format!("{r:.1}")),
     );
     lines.push(kv("TCP", tcp));
+    // nfsd threads this client kept busy (in-flight RPCs; absent on kernels without them).
+    if let Some(l) = &c.inflight {
+        let mut v = vec![Span::raw(format!("{:<9}", "nfsd")).fg(DIM)];
+        if l.peak == 0 {
+            v.push(Span::raw("no requests in flight this interval").fg(DIM));
+        } else {
+            let oldest = Span::raw(fmt::latency(l.oldest_us));
+            v.extend([
+                Span::raw(format!("{} thread{} avg", fmt::avg(l.avg), if fmt::avg(l.avg) == "1.0" { "" } else { "s" })),
+                Span::raw(format!(" · peak {} · oldest ", l.peak)).fg(DIM),
+                if l.oldest_us >= super::SLOW_RPC_US { oldest.yellow().bold() } else { oldest },
+            ]);
+        }
+        lines.push(Line::from(v));
+    }
     match c.best_info() {
         Some(ci) => {
             let mut nfs = format!("v4.{}", ci.minor_version.unwrap_or(0));

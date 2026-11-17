@@ -79,4 +79,16 @@ awk '/^[0-9]/ {print $4}' "$T/ss/001.txt" \
       [ -n "$h" ] && echo "$ip $h"
     done > "$T/hosts" || true
 
+# In-flight RPCs: client address, XID and op numbers only (no file names). Needs an nfscope
+# with --dump-inflight on the server (NFSCOPE=/path/to/nfscope to pick one) and nfsd netlink.
+NFSCOPE=${NFSCOPE:-$(command -v nfscope || true)}
+if [ -n "$NFSCOPE" ]; then
+  mkdir -p "$T/inflight"
+  for i in 1 2 3 4 5; do
+    "$NFSCOPE" --dump-inflight > "$T/inflight/00$i.txt" 2>/dev/null || rm -f "$T/inflight/00$i.txt"
+    sleep 0.2
+  done
+  rmdir "$T/inflight" 2>/dev/null || true
+fi
+
 tar -C "$T" -cf - .

@@ -510,6 +510,74 @@ fn server_stats_missing_from_fixture() {
     key(&mut app, KeyCode::Char('o'));
     let b = render(&mut app, 100, 30);
     assert!(format!("{b}").contains("nfsd server stats unavailable"), "{b}");
+
+    // No inflight/ either: no THREADS column, sorting skips it, `i` explains.
+    key(&mut app, KeyCode::Esc);
+    assert!(app.model.inflight.is_none());
+    assert!(!format!("{}", render(&mut app, 150, 20)).contains("THREADS"));
+    for _ in 0..3 {
+        key(&mut app, KeyCode::Char('s'));
+    }
+    assert_eq!(app.sort, SortKey::ReadTot, "Total → Read → Write → (Threads skipped) → ReadTot");
+    key(&mut app, KeyCode::Char('i'));
+    let b = render(&mut app, 100, 30);
+    assert!(format!("{b}").contains("In-flight requests unavailable"), "{b}");
+}
+
+#[test]
+fn inflight_overlay() {
+    let (mut app, _) = fixture_app();
+    // fixture_app's second sample replays inflight/002.txt.
+    assert_eq!(app.model.inflight.as_ref().expect("fixture has inflight/").now, 7);
+    key(&mut app, KeyCode::Char('i'));
+    assert!(app.show_inflight);
+    insta::assert_snapshot!(render(&mut app, 100, 30));
+    // `o` and `i` switch between the two server overlays; the same key again closes.
+    key(&mut app, KeyCode::Char('o'));
+    assert!(app.show_ops && !app.show_inflight);
+    let text = format!("{}", render(&mut app, 100, 30));
+    assert!(text.contains("In flight 7 now · avg 7.0 · busiest client-01.example.org 3.0 · i: details"), "{text}");
+    key(&mut app, KeyCode::Char('i'));
+    assert!(app.show_inflight && !app.show_ops);
+    key(&mut app, KeyCode::Char('i'));
+    assert!(!app.overlay_open());
+}
+
+#[test]
+fn threads_column_averages_inflight_and_sorts() {
+    use nfscope::parse::inflight::parse_snapshot;
+    use nfscope::workers::IntervalAcc;
+    let (mut app, mut src) = fixture_app();
+    // Two earlier snapshots this interval caught gpu-01 with 4 requests in flight. collect_with
+    // adds the fixture's next one (inflight/001.txt again: gpu-01's slow COMMIT only).
+    let mut acc = IntervalAcc::default();
+    let four = (1..=4).map(|x| format!("10.20.2.21:706 xid={x} age_us=5000\n")).collect::<String>();
+    acc.inflight.add(&parse_snapshot(&four));
+    acc.inflight.add(&parse_snapshot(&four));
+    let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
+    s.mono += Duration::from_secs(10);
+    app.on_sample(s);
+    let gpu: IpAddr = "10.20.2.21".parse().unwrap();
+    let l = app.model.clients[&gpu].inflight.clone().unwrap();
+    assert_eq!((l.avg, l.peak, l.oldest_us), (3.0, 4, 1_340_000));
+
+    for _ in 0..3 {
+        key(&mut app, KeyCode::Char('s'));
+    }
+    assert_eq!(app.sort, SortKey::Threads);
+    assert_eq!(app.rows()[0].ip, gpu);
+    let b = render(&mut app, 150, 20);
+    let (x, y) = find(&b, "THREADS ▼");
+    // Its oldest request ran past a second: the cell is yellow.
+    let row = (y + 1..b.buffer().area.height)
+        .find(|&r| format!("{b}").lines().nth(r as usize).is_some_and(|l| l.contains("10.20.2.21")))
+        .unwrap();
+    assert_eq!(b.buffer()[(x + 8, row)].fg, ratatui::style::Color::Yellow, "{b}");
+
+    app.open_detail(gpu);
+    run_actions(&mut app, &mut src);
+    let text = format!("{}", render(&mut app, 130, 40));
+    assert!(text.contains("nfsd     3.0 threads avg · peak 4 · oldest 1.34 s"), "{text}");
 }
 
 #[test]
@@ -583,12 +651,13 @@ fn flagged_client_explains_its_flags() {
 #[test]
 fn busy_threads_averaged_over_interval() {
     use nfscope::parse::rpc::{ThreadAcc, ThreadStates};
+    use nfscope::workers::IntervalAcc;
     let (mut app, mut src) = fixture_app();
     // Snapshots the sampler took between ticks: one of them caught every thread busy.
-    let mut acc = ThreadAcc::default();
-    acc.add(ThreadStates { running: 1, blocked: 8, idle: 55 });
-    acc.add(ThreadStates { running: 4, blocked: 60, idle: 0 });
-    acc.add(ThreadStates { running: 2, blocked: 10, idle: 52 });
+    let mut acc = IntervalAcc::default();
+    acc.threads.add(ThreadStates { running: 1, blocked: 8, idle: 55 });
+    acc.threads.add(ThreadStates { running: 4, blocked: 60, idle: 0 });
+    acc.threads.add(ThreadStates { running: 2, blocked: 10, idle: 52 });
     // collect_with adds the fixture's next snapshot (threads/001.txt: 9 busy) and resets acc.
     let mut s = nfscope::workers::collect_with(&mut src, 2049, &mut acc);
     s.mono += Duration::from_secs(10); // after fixture_app's samples, which run 2 s ahead

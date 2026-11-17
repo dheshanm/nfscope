@@ -28,6 +28,9 @@ pub fn legend() -> Vec<Span<'static>> {
 }
 pub const DIM: Color = Color::DarkGray;
 
+/// A request running this long (µs) is worth a look: highlighted in yellow.
+pub const SLOW_RPC_US: u64 = 1_000_000;
+
 /// Server-side trouble is red, path loss yellow, client/tuning limits cyan.
 pub fn flag_color(f: crate::model::Flag) -> Color {
     use crate::model::Flag;
@@ -77,6 +80,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.show_ops {
         ops_panel(f, area, app);
+    }
+    if app.show_inflight {
+        inflight_panel(f, area, app);
     }
     if app.show_help {
         help(f, area);
@@ -193,6 +199,23 @@ fn ops_panel(f: &mut Frame, area: Rect, app: &App) {
                 Span::raw(fmt::rate(r.io_write_ps)).fg(WRITE),
                 dim(&format!("   TCP {} / {}", fmt::rate(tr), fmt::rate(tw))),
             ]));
+            let mut l = vec![label("In flight")];
+            match (&m.inflight, &m.inflight_error) {
+                (Some(t), _) => {
+                    l.extend([num(t.now.to_string()), dim(" now · avg "), num(fmt::avg(t.avg))]);
+                    if let Some(c) = t.clients.first().filter(|c| c.avg > 0.0) {
+                        l.extend([
+                            dim(" · busiest "),
+                            num(client_name(app, c.ip)),
+                            dim(&format!(" {}", fmt::avg(c.avg))),
+                        ]);
+                    }
+                    l.push(dim(" · i: details"));
+                }
+                (None, Some(e)) => l.push(dim(&format!("unavailable: {e}"))),
+                (None, None) => l.push(dim("…")),
+            }
+            lines.push(Line::from(l));
             lines.push(Line::default());
             lines.push(Line::from("busy = threads handling a request. Often saturated = add threads;").fg(DIM));
             lines.push(Line::from("many on storage = the exported filesystem is the bottleneck.").fg(DIM));
@@ -203,9 +226,9 @@ fn ops_panel(f: &mut Frame, area: Rect, app: &App) {
     }
 
     // Fixed size whatever the state or number of ops, so the panel never moves or resizes
-    // under the reader's eyes: 10 summary/heading lines, the op rows, and the border.
+    // under the reader's eyes: 11 summary/heading lines, the op rows, and the border.
     const MAX_OPS: usize = 12;
-    const HEIGHT: u16 = 10 + MAX_OPS as u16 + 2;
+    const HEIGHT: u16 = 11 + MAX_OPS as u16 + 2;
     let inner = modal(f, area, 80, HEIGHT, " nfsd server (any key to close) ");
     let room = (inner.height as usize).saturating_sub(lines.len());
     let total: f64 = ops.iter().map(|o| o.1).sum();
@@ -236,6 +259,128 @@ fn ops_panel(f: &mut Frame, area: Rect, app: &App) {
         };
         sparkline(f.buffer_mut(), spark, &hist, scale, color);
     }
+}
+
+/// A client's host name if resolved, else its address (`?` for requests without one).
+fn client_name(app: &App, ip: Option<std::net::IpAddr>) -> String {
+    match ip {
+        Some(ip) => match app.dns.get(&ip) {
+            Some(crate::app::Dns::Name(n)) => n.clone(),
+            _ => ip.to_string(),
+        },
+        None => "?".into(),
+    }
+}
+
+/// `s` cut to `w` columns (ending in `…` when cut), padded to exactly `w`.
+fn fit(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n <= w {
+        format!("{s:<w$}")
+    } else {
+        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    }
+}
+
+/// In-flight overlay: which clients and operations hold the nfsd threads, and the requests
+/// that have been running longest (nfsd netlink `rpc-status-get`, Linux 6.7+).
+fn inflight_panel(f: &mut Frame, area: Rect, app: &App) {
+    use crate::fmt;
+    // Fixed size, like the server panel: 3 summary lines, the client and op tables side by
+    // side, the longest-running list, and the border.
+    const ROWS: usize = 8;
+    const SLOW_ROWS: usize = 8;
+    const HEIGHT: u16 = 3 + 1 + ROWS as u16 + 1 + 2 + SLOW_ROWS as u16 + 2;
+    let inner = modal(f, area, 100, HEIGHT, " nfsd requests in flight (any key to close · o: server) ");
+    let dim = |s: &str| Span::raw(s.to_string()).fg(DIM);
+    let m = &app.model;
+    let Some(l) = &m.inflight else {
+        let lines = match &m.inflight_error {
+            Some(e) => vec![
+                Line::from(format!("In-flight requests unavailable: {e}")).yellow(),
+                Line::default(),
+                Line::from("They come from the nfsd netlink interface (rpc-status-get), which needs").fg(DIM),
+                Line::from("Linux 6.7 or newer with nfsd running. Busy-thread counts (o) work without it.").fg(DIM),
+            ],
+            None => vec![Line::from("Collecting the first interval…").fg(DIM)],
+        };
+        f.render_widget(Paragraph::new(lines), inner);
+        return;
+    };
+    let age = |us: u64| {
+        let s = Span::raw(format!("{:>9}", fmt::latency(us)));
+        if us >= SLOW_RPC_US { s.yellow().bold() } else { s }
+    };
+    let head = Style::new().bold().bg(Color::Indexed(236));
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw(format!("{} in flight now", l.now)).bold(),
+            dim(" · avg "),
+            Span::raw(fmt::avg(l.avg)),
+            dim(" · peak "),
+            Span::raw(l.peak.to_string()),
+            dim(&format!(" · {} snapshot{} this interval", l.snapshots, if l.snapshots == 1 { "" } else { "s" })),
+        ]),
+        Line::from("THREADS = nfsd threads busy with those requests, averaged over the interval.").fg(DIM),
+        Line::default(),
+    ];
+
+    // Clients (left) and operations (right), side by side.
+    let (cw, ow) = (inner.width.saturating_sub(2) as usize * 3 / 5, inner.width.saturating_sub(2) as usize * 2 / 5);
+    let name_w = cw.saturating_sub(8 + 5 + 9 + 1);
+    let op_w = ow.saturating_sub(8 + 9 + 1);
+    let mut row = vec![
+        Span::styled(format!("{}{:>8}{:>5}{:>9} ", fit("CLIENT", name_w), "THREADS", "PEAK", "OLDEST"), head),
+        Span::raw("  "),
+        Span::styled(format!("{}{:>8}{:>9} ", fit("OPERATION", op_w), "THREADS", "OLDEST"), head),
+    ];
+    lines.push(Line::from(std::mem::take(&mut row)));
+    for i in 0..ROWS {
+        let mut spans = Vec::new();
+        match l.clients.get(i) {
+            Some(c) => spans.extend([
+                Span::raw(fit(&client_name(app, c.ip), name_w)),
+                Span::raw(format!("{:>8}{:>5}", fmt::avg(c.avg), c.peak)),
+                age(c.oldest_us),
+                Span::raw(" "),
+            ]),
+            None if i == 0 => spans.push(dim(&fit("no requests in flight this interval", cw))),
+            None => spans.push(Span::raw(" ".repeat(cw))),
+        }
+        spans.push(Span::raw("  "));
+        if let Some(o) = l.ops.get(i) {
+            spans.extend([
+                Span::raw(fit(&o.name, op_w)),
+                Span::raw(format!("{:>8}", fmt::avg(o.avg))),
+                age(o.oldest_us),
+            ]);
+        }
+        lines.push(Line::from(spans));
+    }
+    let more = l.clients.len().saturating_sub(ROWS);
+    lines.push(if more > 0 { Line::from(format!("… and {more} more clients")).fg(DIM) } else { Line::default() });
+
+    lines.push(Line::from("Longest-running requests this interval").bold());
+    let slow_name_w = cw.saturating_sub(9 + 2);
+    lines.push(Line::from(Span::styled(
+        format!("{:>9}  {}{}", "AGE", fit("CLIENT", slow_name_w), fit("OPERATION", ow)),
+        head,
+    )));
+    for s in l.slowest.iter().take(SLOW_ROWS) {
+        lines.push(Line::from(vec![
+            age(s.age_us),
+            Span::raw("  "),
+            Span::raw(fit(&client_name(app, s.client), slow_name_w)),
+            Span::raw(fit(&s.label, op_w)),
+            if s.running { Span::raw(" running").cyan() } else { dim(" done") },
+        ]));
+    }
+    if l.slowest.is_empty() {
+        lines.push(dim("none").into());
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Right-aligned multi-row sparkline: `newest_first[0]` is drawn in the rightmost column.
@@ -326,6 +471,8 @@ fn help(f: &mut Frame, area: Rect) {
         ("…/IMAGES/", "kernel gives only parent/name: groups every dir with that name"),
         ("d", "detail: hide files held only as cached delegations"),
         ("o", "nfsd server health: busy threads, ops/s"),
+        ("i", "requests in flight: which clients / ops hold nfsd threads"),
+        ("THREADS", "avg nfsd threads busy with a client's requests (Linux 6.7+)"),
         ("l", "toggle log pane"),
         ("FLAGS", "Q server behind · S client slow to read · L loss"),
         ("", "W client window limit · B server send buffer limit"),

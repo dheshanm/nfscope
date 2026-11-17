@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 
 use crate::files::{self, FindResult, OpenFiles, Target};
+use crate::inflight::InflightAcc;
 use crate::model::RawSample;
 use crate::parse::nfsd::parse_info;
 use crate::parse::rpc::{ThreadAcc, parse_pool_stats, parse_rpc_nfsd, parse_thread_states};
@@ -23,33 +24,50 @@ pub fn now_hms() -> String {
     jiff::ZonedDateTime::now().strftime("%H:%M:%S").to_string()
 }
 
-/// One sample with a single nfsd thread-state snapshot (tests, `peek`).
-pub fn collect(src: &mut dyn Source, port: u16) -> RawSample {
-    collect_with(src, port, &mut ThreadAcc::default())
+/// Snapshots the sampler takes between two samples (~10 per interval).
+#[derive(Debug, Clone, Default)]
+pub struct IntervalAcc {
+    /// nfsd thread scheduler states.
+    pub threads: ThreadAcc,
+    /// RPCs in flight.
+    pub inflight: InflightAcc,
 }
 
-/// Take one nfsd thread-state snapshot into `acc`.
-fn snapshot_threads(src: &mut dyn Source, acc: &mut ThreadAcc) {
+/// One sample with a single snapshot of the nfsd threads (tests, `peek`).
+pub fn collect(src: &mut dyn Source, port: u16) -> RawSample {
+    collect_with(src, port, &mut IntervalAcc::default())
+}
+
+/// Take one snapshot of the nfsd threads' states and of the RPCs they are working on.
+fn snapshot(src: &mut dyn Source, acc: &mut IntervalAcc) {
     if let Some(t) = src.nfsd_thread_states().ok().and_then(|t| parse_thread_states(&t)) {
-        acc.add(t);
+        acc.threads.add(t);
+    }
+    match src.rpc_status() {
+        Ok(rpcs) => acc.inflight.add(&rpcs),
+        Err(e) => acc.inflight.fail(format!("{e:#}")),
     }
 }
 
-/// One sample whose thread load averages `acc` (snapshots taken since the last sample) plus a
-/// snapshot taken now. `acc` is reset for the next interval.
-pub fn collect_with(src: &mut dyn Source, port: u16, acc: &mut ThreadAcc) -> RawSample {
+/// One sample whose thread load and in-flight RPCs average `acc` (snapshots taken since the
+/// last sample) plus a snapshot taken now. `acc` is reset for the next interval.
+pub fn collect_with(src: &mut dyn Source, port: u16, acc: &mut IntervalAcc) -> RawSample {
     let mono = Instant::now();
     let socks = src.sockets(port).map(|t| parse_ss(&t)).map_err(|e| format!("{e:#}"));
     let clients =
         src.client_infos().map(|v| v.iter().map(|(id, t)| parse_info(id, t)).collect()).map_err(|e| format!("{e:#}"));
+    snapshot(src, acc);
+    let acc = std::mem::take(acc);
     let nfsd = src.nfsd_stats().map_err(|e| format!("{e:#}")).map(|t| {
         let mut n = parse_rpc_nfsd(&t);
         n.pool = src.pool_stats().ok().and_then(|p| parse_pool_stats(&p));
-        snapshot_threads(src, acc);
-        n.thread_load = std::mem::take(acc).finish();
+        n.thread_load = acc.threads.finish();
         n
     });
-    *acc = ThreadAcc::default();
+    let inflight = acc.inflight.finish();
+    if let Err(e) = &inflight {
+        tracing::debug!("in-flight RPCs unavailable: {e}");
+    }
     if let Err(e) = &nfsd {
         tracing::debug!("nfsd server stats unavailable: {e}");
     }
@@ -59,7 +77,7 @@ pub fn collect_with(src: &mut dyn Source, port: u16, acc: &mut ThreadAcc) -> Raw
     if let Err(e) = &clients {
         tracing::debug!("nfsd client info unavailable: {e}");
     }
-    RawSample { mono, wall: now_hms(), socks, clients, nfsd }
+    RawSample { mono, wall: now_hms(), socks, clients, nfsd, inflight }
 }
 
 pub fn spawn_sampler(
@@ -73,15 +91,15 @@ pub fn spawn_sampler(
         .name("sampler".into())
         .spawn(move || {
             let mut src = spec.build();
-            let mut acc = ThreadAcc::default();
+            let mut acc = IntervalAcc::default();
             loop {
                 let started = Instant::now();
                 if tx.send(collect_with(src.as_mut(), port, &mut acc)).is_err() {
                     return;
                 }
                 tracing::trace!("sample took {:?}", started.elapsed());
-                // Until the next tick, snapshot nfsd thread states ~10x so the busy average and
-                // peak cover the whole interval. A new interval wakes us early.
+                // Until the next tick, snapshot the nfsd threads ~10x so the busy and in-flight
+                // averages and peaks cover the whole interval. A new interval wakes us early.
                 let deadline = started + interval;
                 let step = (interval / 10).max(Duration::from_millis(100));
                 let mut next = started + step;
@@ -94,7 +112,7 @@ pub fn spawn_sampler(
                         }
                         Err(RecvTimeoutError::Timeout) if Instant::now() >= deadline => break,
                         Err(RecvTimeoutError::Timeout) => {
-                            snapshot_threads(src.as_mut(), &mut acc);
+                            snapshot(src.as_mut(), &mut acc);
                             next += step;
                         }
                         Err(RecvTimeoutError::Disconnected) => return,

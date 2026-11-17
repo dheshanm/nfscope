@@ -1,6 +1,6 @@
 [package]
 name = "nfscope"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "Live top-like TUI for NFS server client I/O"
 
@@ -20,6 +20,9 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tui-logger = { version = "0.18.3", features = ["tracing-support"] }
 tui-tree-widget = "0.24.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 insta = "1.49.0"

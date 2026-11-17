@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "nfscope"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "clap",
  "color-eyre",
@@ -1046,6 +1046,7 @@ dependencies = [
  "humansize",
  "insta",
  "jiff 1.0.0",
+ "libc",
  "nucleo-matcher",
  "ratatui",
  "throbber-widgets-tui",

@@ -1,0 +1,8 @@
+# Half a second later: the gpu-01 COMMIT (same xid) is still running.
+10.20.1.11:700 xid=0x5f1c0003 prog=100003 vers=4 proc=1 age_us=420 ops=53,22,25
+10.20.1.11:701 xid=0x5f1c0004 prog=100003 vers=4 proc=1 age_us=2650 ops=53,22,25
+10.20.1.11:700 xid=0x5f1c0005 prog=100003 vers=4 proc=1 age_us=95 ops=53,22,9
+10.20.2.21:706 xid=0x2a000010 prog=100003 vers=4 proc=1 age_us=1840000 ops=53,22,5
+10.20.2.21:706 xid=0x2a000011 prog=100003 vers=4 proc=1 age_us=15200 ops=53,22,38
+10.20.4.50:710 xid=0x77000002 prog=100003 vers=3 proc=6 age_us=4100
+10.20.3.30:708 xid=0x31000001 prog=100003 vers=4 proc=1 age_us=180 ops=53,22,3

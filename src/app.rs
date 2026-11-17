@@ -41,6 +41,8 @@ pub enum SortKey {
     Read,
     Write,
     Total,
+    /// nfsd threads held (in-flight RPCs).
+    Threads,
     ReadTot,
     WriteTot,
     Conns,
@@ -48,10 +50,11 @@ pub enum SortKey {
 }
 
 impl SortKey {
-    const ORDER: [SortKey; 8] = [
+    const ORDER: [SortKey; 9] = [
         SortKey::Total,
         SortKey::Read,
         SortKey::Write,
+        SortKey::Threads,
         SortKey::ReadTot,
         SortKey::WriteTot,
         SortKey::Conns,
@@ -151,6 +154,8 @@ pub struct App {
     pub show_help: bool,
     /// nfsd server health overlay.
     pub show_ops: bool,
+    /// In-flight RPCs overlay: which clients and operations hold nfsd threads.
+    pub show_inflight: bool,
     pub dns_enabled: bool,
     pub dns: HashMap<IpAddr, Dns>,
     pub throbber: ThrobberState,
@@ -179,6 +184,7 @@ impl App {
             show_log: false,
             show_help: false,
             show_ops: false,
+            show_inflight: false,
             dns_enabled,
             dns: HashMap::new(),
             throbber: ThrobberState::default(),
@@ -369,6 +375,7 @@ impl App {
                 SortKey::Read => a.read_bps.total_cmp(&b.read_bps),
                 SortKey::Write => a.write_bps.total_cmp(&b.write_bps),
                 SortKey::Total => a.total_bps().total_cmp(&b.total_bps()),
+                SortKey::Threads => a.threads().total_cmp(&b.threads()),
                 SortKey::ReadTot => a.read_total.cmp(&b.read_total),
                 SortKey::WriteTot => a.write_total.cmp(&b.write_total),
                 SortKey::Conns => a.conns.len().cmp(&b.conns.len()),
@@ -398,7 +405,14 @@ impl App {
             return;
         }
         if self.overlay_open() {
+            // `o` and `i` switch between the two server overlays; any other key closes.
+            let (ops, inflight) = (self.show_ops, self.show_inflight);
             self.close_overlay();
+            match k.code {
+                KeyCode::Char('o') if !ops => self.show_ops = true,
+                KeyCode::Char('i') if !inflight => self.show_inflight = true,
+                _ => {}
+            }
             return;
         }
         if self.editing_filter() {
@@ -409,6 +423,7 @@ impl App {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('o') => self.show_ops = true,
+            KeyCode::Char('i') => self.show_inflight = true,
             KeyCode::Char('p') => self.paused = !self.paused,
             KeyCode::Char('l') => self.show_log = !self.show_log,
             KeyCode::Char('+') | KeyCode::Char('=') => self.step_interval(1),
@@ -420,14 +435,15 @@ impl App {
         }
     }
 
-    /// A modal (help or server health) is on top; the next key or click closes it.
+    /// A modal (help, server health or in-flight RPCs) is on top; the next key or click closes it.
     pub fn overlay_open(&self) -> bool {
-        self.show_help || self.show_ops
+        self.show_help || self.show_ops || self.show_inflight
     }
 
     fn close_overlay(&mut self) {
         self.show_help = false;
         self.show_ops = false;
+        self.show_inflight = false;
     }
 
     fn editing_filter(&self) -> bool {
@@ -501,6 +517,10 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.move_selection(isize::MAX / 2),
             KeyCode::Char('s') => {
                 self.sort = self.sort.next();
+                // The THREADS column only exists while in-flight RPCs are available.
+                if self.sort == SortKey::Threads && self.model.inflight.is_none() {
+                    self.sort = self.sort.next();
+                }
                 self.sort_desc = self.sort.default_desc();
             }
             KeyCode::Char('S') => self.sort_desc = !self.sort_desc,

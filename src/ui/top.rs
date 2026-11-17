@@ -8,7 +8,7 @@ use throbber_widgets_tui::Throbber;
 use crossterm::event::KeyCode;
 use ratatui::layout::Flex;
 
-use super::{DIM, READ, WRITE, footer as draw_footer, legend, status_lines};
+use super::{DIM, READ, SLOW_RPC_US, WRITE, footer as draw_footer, legend, status_lines};
 use crate::app::{App, SortKey};
 use crate::fmt;
 
@@ -46,11 +46,25 @@ pub fn draw(f: &mut Frame, area: Rect, app: &mut App) {
                 ("-", "faster", Some(Char('-'))),
                 ("l", "log", Some(Char('l'))),
                 ("o", "nfsd", Some(Char('o'))),
+                ("i", "in-flight", Some(Char('i'))),
                 ("?", "help", Some(Char('?'))),
             ],
             &mut app.hit,
         );
     }
+}
+
+/// Average nfsd threads the client held over the interval: dim `·` when none, bold from one
+/// whole thread, yellow when one of its requests has been running for a second or more.
+fn threads_cell(c: &crate::model::ClientStat) -> Cell<'static> {
+    let Some(l) = &c.inflight else { return Cell::from("") };
+    let style = match l {
+        l if l.oldest_us >= SLOW_RPC_US => Style::new().fg(Color::Yellow).bold(),
+        l if l.avg >= 1.0 => Style::new().bold(),
+        _ => Style::new(),
+    };
+    let text = if l.avg <= 0.0 { Line::from("·").fg(DIM) } else { Line::from(fmt::avg(l.avg)).style(style) };
+    Cell::from(text.alignment(Alignment::Right))
 }
 
 /// TCP health flags for a client (`Q`, `L`, …), or a dim `·` when there are none.
@@ -186,20 +200,27 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
     app.sync_selection(&rows);
     let has_rates = app.model.has_rates();
 
+    // THREADS (nfsd threads held, from in-flight RPCs) only when the kernel reports them.
+    let threads = app.model.inflight.is_some();
     let ip_w = rows.iter().map(|c| c.ip.to_string().len()).max().unwrap_or(0).clamp(9, 39) as u16;
-    let cols: [(&str, Option<SortKey>, u16); 10] = [
-        ("CLIENT", Some(SortKey::Ip), ip_w),
-        ("READ/s", Some(SortKey::Read), 12),
-        ("WRITE/s", Some(SortKey::Write), 12),
-        ("TOTAL/s", Some(SortKey::Total), 12),
-        ("TREND", None, TREND_W as u16),
-        ("READ TOT", Some(SortKey::ReadTot), 10),
-        ("WRITE TOT", Some(SortKey::WriteTot), 10),
-        ("CONN", Some(SortKey::Conns), 5),
-        ("FLAGS", None, 6),
-        ("HOST  [NFSv4 client name]", Some(SortKey::Host), 0),
+    // (name, sort key, width (0 = fill), right-aligned)
+    let mut cols: Vec<(&str, Option<SortKey>, u16, bool)> = vec![
+        ("CLIENT", Some(SortKey::Ip), ip_w, false),
+        ("READ/s", Some(SortKey::Read), 12, true),
+        ("WRITE/s", Some(SortKey::Write), 12, true),
+        ("TOTAL/s", Some(SortKey::Total), 12, true),
+        ("TREND", None, TREND_W as u16, false),
+        ("READ TOT", Some(SortKey::ReadTot), 10, true),
+        ("WRITE TOT", Some(SortKey::WriteTot), 10, true),
+        ("CONN", Some(SortKey::Conns), 5, true),
+        ("FLAGS", None, 6, false),
+        ("HOST  [NFSv4 client name]", Some(SortKey::Host), 0, false),
     ];
-    let header = Row::new(cols.iter().enumerate().map(|(i, (name, key, _))| {
+    const THREADS_AT: usize = 5;
+    if threads {
+        cols.insert(THREADS_AT, ("THREADS", Some(SortKey::Threads), 9, true));
+    }
+    let header = Row::new(cols.iter().map(|(name, key, _, right)| {
         let arrow = match key {
             Some(k) if *k == app.sort => {
                 if app.sort_desc {
@@ -219,7 +240,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
             _ => {}
         }
         let line = Line::from(text).style(style);
-        Cell::from(if (1..8).contains(&i) && i != 4 { line.alignment(Alignment::Right) } else { line })
+        Cell::from(if *right { line.alignment(Alignment::Right) } else { line })
     }))
     .style(Style::new().bg(Color::Indexed(236)));
 
@@ -244,7 +265,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
             } else {
                 host.push(Span::raw("  [no NFSv4 record]").fg(DIM).italic());
             }
-            Row::new(vec![
+            let mut cells = vec![
                 Cell::from(c.ip.to_string()),
                 num(c.read_bps, READ),
                 num(c.write_bps, WRITE),
@@ -255,12 +276,16 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
                 right(c.conns.len().to_string(), Style::new()),
                 Cell::from(flags_line(c)),
                 Cell::from(Line::from(host)),
-            ])
+            ];
+            if threads {
+                cells.insert(THREADS_AT, threads_cell(c));
+            }
+            Row::new(cells)
         })
         .collect();
 
     let widths: Vec<Constraint> =
-        cols.iter().map(|(_, _, w)| if *w == 0 { Constraint::Fill(1) } else { Constraint::Length(*w) }).collect();
+        cols.iter().map(|(_, _, w, _)| if *w == 0 { Constraint::Fill(1) } else { Constraint::Length(*w) }).collect();
 
     let mut title = vec![Span::raw(format!(" Clients ({}) ", rows.len()))];
     if !app.filter.is_empty() {
@@ -275,7 +300,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &mut App) {
         inner.width,
         1.min(inner.height),
     ));
-    for ((_, key, _), r) in cols.iter().zip(col_rects.iter()) {
+    for ((_, key, _, _), r) in cols.iter().zip(col_rects.iter()) {
         if let Some(k) = key {
             app.hit.sort_headers.push((*r, *k));
         }
