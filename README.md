@@ -35,9 +35,8 @@ eBPF, nothing to install on clients. One static ~5 MB binary.
 Download the static binary on the NFS server (no dependencies, any distribution):
 
 ```sh
-arch=$(uname -m)   # x86_64 or aarch64
 curl -fLo /usr/local/sbin/nfscope \
-  "https://github.com/dheshanm/nfscope/releases/latest/download/nfscope-$arch-unknown-linux-musl"
+  "https://github.com/dheshanm/nfscope/releases/latest/download/nfscope-$(uname -m)-unknown-linux-musl"
 chmod +x /usr/local/sbin/nfscope
 ```
 
